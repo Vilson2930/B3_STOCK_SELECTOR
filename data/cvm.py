@@ -6,7 +6,7 @@
 # - Download de dados oficiais da CVM
 # - Cache local
 # - Leitura padronizada
-# - DFP / ITR / FCA
+# - DFP / ITR / FCA / FRE
 #
 # NÃO FAZ:
 # - Ranking
@@ -81,6 +81,10 @@ SUPPORTED_DATASETS = {
     "FCA": {
         "folder": "FCA/DADOS",
         "filename": "fca_cia_aberta_{year}.zip",
+    },
+    "FRE": {
+        "folder": "FRE/DADOS",
+        "filename": "fre_cia_aberta_{year}.zip",
     },
 }
 
@@ -335,7 +339,7 @@ def download_dataset(
     force: bool = False,
 ) -> Path:
     """
-    Baixa DFP, ITR ou FCA diretamente da CVM.
+    Baixa DFP, ITR, FCA ou FRE diretamente da CVM.
 
     Se o arquivo já existir e estiver íntegro,
     utiliza o cache local.
