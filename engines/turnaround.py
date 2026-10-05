@@ -4,46 +4,20 @@
 #
 # TURNAROUND / ASYMMETRY ENGINE
 #
-# OBJETIVO:
-# Identificar empresas em uma condição econômica compatível com possível
-# recuperação operacional / assimetria, SEM transformar baixa rentabilidade
-# isolada em recomendação de compra.
+# SCORE EXPERIMENTAL FUNDAMENTAL:
 #
-# EVIDÊNCIA DO ESTUDO:
+#   MARGEM_BRUTA    = 50%
+#   MARGEM_LIQUIDA  = 30%
+#   ROE             = 20%
 #
-# MARGEM_BRUTA:
-# - principal sinal candidato;
-# - direção observada: LOW;
-# - AUC 2018 ~ 0.7217;
-# - gradiente por quintis:
-#       Q1 = 6.42% winners
-#       Q2 = 4.59%
-#       Q3 = 3.67%
-#       Q4 = 0.92%
-#       Q5 = 0.00%
-# - Spearman quintis = -1.0;
-# - 15/17 winners estavam na metade inferior da distribuição.
-#
-# MARGEM_LIQUIDA:
-# - sinal secundário recorrente;
-# - direção LOW.
-#
-# ROE:
-# - sinal recorrente mais fraco;
-# - direção LOW.
+# Todos com direção LOW.
 #
 # IMPORTANTE:
-# A combinação desses sinais NÃO foi validada como regra final.
-#
-# O full model 2022 NÃO replicou robustamente.
-# O multivariado 2018 NÃO sobreviveu à permutação global.
-#
-# CONSEQUÊNCIA:
-# Este engine NÃO está autorizado a gerar compra.
-#
-# PRODUÇÃO:
-# TURNAROUND_ENGINE["production_authorized"] deve permanecer False
-# até existir validação temporal independente suficiente.
+# - pesos baseados na força relativa da evidência encontrada;
+# - não são pesos otimizados por retorno futuro;
+# - score permanece EXPERIMENTAL;
+# - não gera compra;
+# - produção permanece bloqueada até validação temporal adicional.
 # =============================================================================
 
 from __future__ import annotations
@@ -54,11 +28,6 @@ from typing import Iterable
 
 import numpy as np
 import pandas as pd
-
-
-# =============================================================================
-# CONFIG
-# =============================================================================
 
 try:
     from config import OUTPUT_DIR, TURNAROUND_ENGINE
@@ -79,24 +48,20 @@ TURNAROUND_DIR = OUTPUT_DIR / "turnaround"
 TURNAROUND_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# =============================================================================
-# EXCEÇÕES
-# =============================================================================
-
 class TurnaroundError(RuntimeError):
-    """Erro geral do Turnaround Engine."""
+    pass
 
 
 class TurnaroundIntegrityError(TurnaroundError):
-    """Erro de integridade."""
+    pass
 
 
 class TurnaroundProductionError(TurnaroundError):
-    """Tentativa de usar sinal experimental como produção."""
+    pass
 
 
 # =============================================================================
-# FATORES DE PESQUISA
+# FATORES E PESOS
 # =============================================================================
 
 RESEARCH_FACTORS = {
@@ -104,17 +69,27 @@ RESEARCH_FACTORS = {
         "direction": "LOW",
         "role": "PRIMARY",
         "status": "CANDIDATE",
+        "weight": 0.50,
     },
     "MARGEM_LIQUIDA": {
         "direction": "LOW",
         "role": "SECONDARY",
         "status": "RECURRENT_SIGNAL",
+        "weight": 0.30,
     },
     "ROE": {
         "direction": "LOW",
-        "role": "CONTEXT",
+        "role": "SECONDARY",
         "status": "WEAK_RECURRENT_SIGNAL",
+        "weight": 0.20,
     },
+}
+
+
+RESEARCH_WEIGHTS = {
+    "MARGEM_BRUTA": 0.50,
+    "MARGEM_LIQUIDA": 0.30,
+    "ROE": 0.20,
 }
 
 
@@ -124,15 +99,6 @@ BLOCKED_RESEARCH_FACTORS = (
     "INTANGIVEL_ATIVO_AS_OPPORTUNITY",
 )
 
-
-SAFETY_FLAGS = (
-    "PL_POSITIVO",
-)
-
-
-# =============================================================================
-# UTILIDADES
-# =============================================================================
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -172,7 +138,7 @@ def _require_columns(
 
 
 # =============================================================================
-# PROTEÇÃO CONTRA RETORNO FUTURO
+# RETORNO FUTURO
 # =============================================================================
 
 def assert_no_future_return(
@@ -187,12 +153,11 @@ def assert_no_future_return(
         "FUTURE_WINNER",
     )
 
-    # Colunas exclusivamente de auditoria.
-    # Elas podem existir somente se não indicarem uso de retorno futuro.
     allowed_audit_columns = {
         "FUTURE_RETURN_USED",
         "FUTURE_RETURN_USED_QUALITY",
         "FUTURE_RETURN_USED_TURNAROUND",
+        "FUTURE_RETURN_USED_VALUATION",
     }
 
     forbidden = []
@@ -208,17 +173,13 @@ def assert_no_future_return(
             if not values.empty:
 
                 normalized_values = (
-                    values
-                    .astype(str)
+                    values.astype(str)
                     .str.strip()
                     .str.upper()
                 )
 
                 invalid = ~normalized_values.isin(
-                    {
-                        "FALSE",
-                        "0",
-                    }
+                    {"FALSE", "0"}
                 )
 
                 if invalid.any():
@@ -237,9 +198,8 @@ def assert_no_future_return(
 
     if forbidden:
         raise TurnaroundIntegrityError(
-            "FAIL-SAFE: retorno futuro ou label "
-            "detectado no Turnaround Engine: "
-            f"{forbidden}"
+            "FAIL-SAFE: retorno futuro ou label detectado "
+            f"no Turnaround Engine: {forbidden}"
         )
 
 
@@ -270,6 +230,7 @@ def prepare_turnaround_base(
     result = fundamentals.copy()
 
     if "INVESTABLE" in result.columns:
+
         result = result.loc[
             result["INVESTABLE"]
             .fillna(False)
@@ -284,8 +245,7 @@ def prepare_turnaround_base(
 
     if result.empty:
         raise TurnaroundIntegrityError(
-            "FAIL-SAFE: nenhuma empresa elegível "
-            "para Turnaround."
+            "FAIL-SAFE: nenhuma empresa elegível para Turnaround."
         )
 
     if result["ISSUER_ID"].duplicated().any():
@@ -297,7 +257,7 @@ def prepare_turnaround_base(
 
 
 # =============================================================================
-# PERCENTIL
+# PERCENTIS
 # =============================================================================
 
 def percentile_position(
@@ -328,15 +288,8 @@ def percentile_position(
         )
     )
 
-    return result.clip(
-        0.0,
-        1.0,
-    )
+    return result.clip(0.0, 1.0)
 
-
-# =============================================================================
-# POSIÇÃO DOS FATORES
-# =============================================================================
 
 def calculate_research_positions(
     df: pd.DataFrame,
@@ -356,7 +309,45 @@ def calculate_research_positions(
 
 
 # =============================================================================
-# MARGEM BRUTA
+# SINAIS LOW
+# =============================================================================
+
+def calculate_depressed_signals(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    result = df.copy()
+
+    for factor in RESEARCH_FACTORS:
+
+        percentile = pd.to_numeric(
+            result[
+                f"{factor}_PERCENTILE"
+            ],
+            errors="coerce",
+        )
+
+        result[
+            f"{factor}_DEPRESSED_SIGNAL"
+        ] = (
+            1.0 - percentile
+        ).clip(
+            lower=0.0,
+            upper=1.0,
+        )
+
+    # Compatibilidade com relatórios anteriores.
+    result[
+        "GROSS_MARGIN_RESEARCH_SIGNAL"
+    ] = result[
+        "MARGEM_BRUTA_DEPRESSED_SIGNAL"
+    ]
+
+    return result
+
+
+# =============================================================================
+# ZONA DE MARGEM BRUTA
 # =============================================================================
 
 def classify_gross_margin_zone(
@@ -406,74 +397,31 @@ def classify_gross_margin_zone(
     return result
 
 
-def calculate_gross_margin_research_signal(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-
-    result = df.copy()
-
-    percentile = pd.to_numeric(
-        result["MARGEM_BRUTA_PERCENTILE"],
-        errors="coerce",
-    )
-
-    result[
-        "GROSS_MARGIN_RESEARCH_SIGNAL"
-    ] = (
-        1.0 - percentile
-    ).clip(
-        lower=0.0,
-        upper=1.0,
-    )
-
-    return result
-
-
 # =============================================================================
-# CONTEXTO SECUNDÁRIO
+# SAFETY CONTEXT
 # =============================================================================
 
-def calculate_secondary_context(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
+def _boolean_context(
+    result: pd.DataFrame,
+    source: str,
+    target: str,
+) -> None:
 
-    result = df.copy()
+    if source in result.columns:
 
-    for factor in (
-        "MARGEM_LIQUIDA",
-        "ROE",
-    ):
-
-        percentile_column = (
-            f"{factor}_PERCENTILE"
+        result[target] = (
+            result[source]
+            .astype("boolean")
         )
 
-        signal_column = (
-            f"{factor}_DEPRESSED_SIGNAL"
+    else:
+
+        result[target] = pd.Series(
+            pd.NA,
+            index=result.index,
+            dtype="boolean",
         )
 
-        result[
-            signal_column
-        ] = (
-            1.0
-            -
-            pd.to_numeric(
-                result[
-                    percentile_column
-                ],
-                errors="coerce",
-            )
-        ).clip(
-            lower=0.0,
-            upper=1.0,
-        )
-
-    return result
-
-
-# =============================================================================
-# PROTEÇÃO CONTRA VALUE TRAP
-# =============================================================================
 
 def calculate_safety_context(
     df: pd.DataFrame,
@@ -481,65 +429,141 @@ def calculate_safety_context(
 
     result = df.copy()
 
-    if "PL_POSITIVO" in result.columns:
-        result[
-            "TURNAROUND_PL_POSITIVE"
-        ] = (
-            result[
-                "PL_POSITIVO"
-            ]
-            .astype("boolean")
-        )
-    else:
-        result[
-            "TURNAROUND_PL_POSITIVE"
-        ] = pd.Series(
-            pd.NA,
-            index=result.index,
-            dtype="boolean",
-        )
+    _boolean_context(
+        result,
+        "PL_POSITIVO",
+        "TURNAROUND_PL_POSITIVE",
+    )
 
-    if "FCO_POSITIVO" in result.columns:
-        result[
-            "TURNAROUND_FCO_POSITIVE"
-        ] = (
-            result[
-                "FCO_POSITIVO"
-            ]
-            .astype("boolean")
-        )
-    else:
-        result[
-            "TURNAROUND_FCO_POSITIVE"
-        ] = pd.Series(
-            pd.NA,
-            index=result.index,
-            dtype="boolean",
-        )
+    _boolean_context(
+        result,
+        "FCO_POSITIVO",
+        "TURNAROUND_FCO_POSITIVE",
+    )
 
-    if "EBIT_POSITIVO" in result.columns:
-        result[
-            "TURNAROUND_EBIT_POSITIVE"
-        ] = (
-            result[
-                "EBIT_POSITIVO"
-            ]
-            .astype("boolean")
-        )
-    else:
-        result[
-            "TURNAROUND_EBIT_POSITIVE"
-        ] = pd.Series(
-            pd.NA,
-            index=result.index,
-            dtype="boolean",
-        )
+    _boolean_context(
+        result,
+        "EBIT_POSITIVO",
+        "TURNAROUND_EBIT_POSITIVE",
+    )
 
     return result
 
 
 # =============================================================================
-# CANDIDATO DE PESQUISA
+# SCORE EXPERIMENTAL 50 / 30 / 20
+# =============================================================================
+
+def calculate_experimental_score(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    result = df.copy()
+
+    signal_columns = {
+        "MARGEM_BRUTA":
+            "MARGEM_BRUTA_DEPRESSED_SIGNAL",
+
+        "MARGEM_LIQUIDA":
+            "MARGEM_LIQUIDA_DEPRESSED_SIGNAL",
+
+        "ROE":
+            "ROE_DEPRESSED_SIGNAL",
+    }
+
+    weighted_sum = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
+
+    available_weight = pd.Series(
+        0.0,
+        index=result.index,
+        dtype=float,
+    )
+
+    for factor, weight in RESEARCH_WEIGHTS.items():
+
+        column = signal_columns[factor]
+
+        signal = pd.to_numeric(
+            result[column],
+            errors="coerce",
+        )
+
+        valid = signal.notna()
+
+        weighted_sum.loc[valid] += (
+            signal.loc[valid]
+            * weight
+        )
+
+        available_weight.loc[valid] += weight
+
+    # -------------------------------------------------------------------------
+    # NÃO IMPUTAMOS FATOR AUSENTE.
+    #
+    # O peso é renormalizado somente entre fatores disponíveis.
+    # Porém o score só é considerado válido quando todos os três fatores
+    # estiverem disponíveis. Assim não alteramos silenciosamente a regra.
+    # -------------------------------------------------------------------------
+
+    score = pd.Series(
+        np.nan,
+        index=result.index,
+        dtype=float,
+    )
+
+    has_any = available_weight.gt(0)
+
+    score.loc[has_any] = (
+        weighted_sum.loc[has_any]
+        /
+        available_weight.loc[has_any]
+    )
+
+    result[
+        "TURNAROUND_RESEARCH_WEIGHT_COVERAGE"
+    ] = available_weight
+
+    result[
+        "TURNAROUND_RESEARCH_SCORE"
+    ] = score.clip(
+        lower=0.0,
+        upper=1.0,
+    )
+
+    result[
+        "TURNAROUND_RESEARCH_SCORE_VALID"
+    ] = (
+        result[
+            "TURNAROUND_RESEARCH_SCORE"
+        ]
+        .notna()
+        &
+        available_weight.ge(0.999999)
+    )
+
+    # Score incompleto permanece visível para auditoria,
+    # mas não é elegível como score completo.
+    result[
+        "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+    ] = np.where(
+        result[
+            "TURNAROUND_RESEARCH_SCORE_VALID"
+        ],
+        result[
+            "TURNAROUND_RESEARCH_SCORE"
+        ],
+        np.nan,
+    )
+
+    return result
+
+
+# =============================================================================
+# CLASSIFICAÇÃO EXPERIMENTAL
 # =============================================================================
 
 def classify_research_candidate(
@@ -548,8 +572,10 @@ def classify_research_candidate(
 
     result = df.copy()
 
-    percentile = pd.to_numeric(
-        result["MARGEM_BRUTA_PERCENTILE"],
+    score = pd.to_numeric(
+        result[
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+        ],
         errors="coerce",
     )
 
@@ -560,15 +586,15 @@ def classify_research_candidate(
     )
 
     status.loc[
-        percentile.le(0.50)
+        score.ge(0.50)
     ] = "RESEARCH_CANDIDATE"
 
     status.loc[
-        percentile.le(0.20)
+        score.ge(0.80)
     ] = "HIGH_RESEARCH_INTEREST"
 
     status.loc[
-        percentile.isna()
+        score.isna()
     ] = "INSUFFICIENT_DATA"
 
     result[
@@ -579,37 +605,7 @@ def classify_research_candidate(
 
 
 # =============================================================================
-# SCORE EXPERIMENTAL
-# =============================================================================
-
-def calculate_experimental_score(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-
-    result = df.copy()
-
-    # Intencionalmente utiliza somente a posição da margem bruta.
-    # Margem líquida e ROE permanecem contexto.
-    result[
-        "TURNAROUND_RESEARCH_SCORE"
-    ] = result[
-        "GROSS_MARGIN_RESEARCH_SIGNAL"
-    ]
-
-    result[
-        "TURNAROUND_RESEARCH_SCORE_VALID"
-    ] = (
-        result[
-            "TURNAROUND_RESEARCH_SCORE"
-        ]
-        .notna()
-    )
-
-    return result
-
-
-# =============================================================================
-# BLOQUEIO DE PRODUÇÃO
+# PRODUÇÃO
 # =============================================================================
 
 def enforce_production_lock() -> None:
@@ -621,10 +617,8 @@ def enforce_production_lock() -> None:
         )
     )
 
-    validated_rule = (
-        TURNAROUND_ENGINE.get(
-            "validated_rule"
-        )
+    validated_rule = TURNAROUND_ENGINE.get(
+        "validated_rule"
     )
 
     if (
@@ -664,17 +658,11 @@ def run_turnaround_engine(
         base
     )
 
-    result = classify_gross_margin_zone(
+    result = calculate_depressed_signals(
         result
     )
 
-    result = (
-        calculate_gross_margin_research_signal(
-            result
-        )
-    )
-
-    result = calculate_secondary_context(
+    result = classify_gross_margin_zone(
         result
     )
 
@@ -682,11 +670,11 @@ def run_turnaround_engine(
         result
     )
 
-    result = classify_research_candidate(
+    result = calculate_experimental_score(
         result
     )
 
-    result = calculate_experimental_score(
+    result = classify_research_candidate(
         result
     )
 
@@ -709,10 +697,8 @@ def run_turnaround_engine(
 
     else:
 
-        validated_rule = (
-            TURNAROUND_ENGINE.get(
-                "validated_rule"
-            )
+        validated_rule = TURNAROUND_ENGINE.get(
+            "validated_rule"
         )
 
         if validated_rule is None:
@@ -727,13 +713,19 @@ def run_turnaround_engine(
 
     result[
         "TURNAROUND_ENGINE_VERSION"
-    ] = "0.1.1"
+    ] = "0.2.0"
 
     result[
         "TURNAROUND_ENGINE_STATUS"
     ] = TURNAROUND_ENGINE.get(
         "status",
         "RESEARCH_CANDIDATE",
+    )
+
+    result[
+        "TURNAROUND_SCORE_MODEL"
+    ] = (
+        "MB_50_ML_30_ROE_20_RESEARCH"
     )
 
     result[
@@ -752,7 +744,7 @@ def run_turnaround_engine(
         "TURNAROUND_RESEARCH_RANK"
     ] = (
         result[
-            "TURNAROUND_RESEARCH_SCORE"
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
         ]
         .rank(
             ascending=False,
@@ -765,7 +757,7 @@ def run_turnaround_engine(
         result
         .sort_values(
             [
-                "TURNAROUND_RESEARCH_SCORE",
+                "TURNAROUND_RESEARCH_SCORE_COMPLETE",
                 "ISSUER_ID",
             ],
             ascending=[
@@ -819,22 +811,45 @@ def audit_turnaround(
         .to_dict()
     )
 
+    valid = (
+        result[
+            "TURNAROUND_RESEARCH_SCORE_VALID"
+        ]
+        .fillna(False)
+        .astype(bool)
+    )
+
     return {
         "status": "OK",
         "mode": "RESEARCH_ONLY",
-        "issuers": int(len(result)),
-        "primary_factor": "MARGEM_BRUTA",
-        "primary_direction": "LOW",
-        "research_status_distribution": status_counts,
-        "gross_margin_zone_distribution": zone_counts,
-        "production_authorized": bool(
-            TURNAROUND_ENGINE.get(
-                "production_authorized",
-                False,
-            )
-        ),
-        "future_return_used": False,
-        "buy_signal_generated": False,
+        "score_model":
+            "MB_50_ML_30_ROE_20_RESEARCH",
+        "issuers":
+            int(len(result)),
+        "valid_complete_scores":
+            int(valid.sum()),
+        "weights": RESEARCH_WEIGHTS,
+        "primary_factor":
+            "MARGEM_BRUTA",
+        "primary_direction":
+            "LOW",
+        "research_status_distribution":
+            status_counts,
+        "gross_margin_zone_distribution":
+            zone_counts,
+        "production_authorized":
+            bool(
+                TURNAROUND_ENGINE.get(
+                    "production_authorized",
+                    False,
+                )
+            ),
+        "weights_optimized_on_future_return":
+            False,
+        "future_return_used":
+            False,
+        "buy_signal_generated":
+            False,
     }
 
 
@@ -874,27 +889,36 @@ def save_turnaround(
     )
 
     manifest = {
-        "engine": "TURNAROUND_ENGINE",
-        "created_at_utc": _utc_now_iso(),
-        "formation_date": str(
-            context
-            .formation_date
-            .date()
-        ),
-        "accounting_cutoff": str(
-            context
-            .accounting_cutoff
-            .date()
-        ),
-        "research_factors": RESEARCH_FACTORS,
-        "blocked_research_factors": list(
-            BLOCKED_RESEARCH_FACTORS
-        ),
+        "engine":
+            "TURNAROUND_ENGINE",
+        "version":
+            "0.2.0",
+        "created_at_utc":
+            _utc_now_iso(),
+        "formation_date":
+            str(
+                context
+                .formation_date
+                .date()
+            ),
+        "accounting_cutoff":
+            str(
+                context
+                .accounting_cutoff
+                .date()
+            ),
+        "research_factors":
+            RESEARCH_FACTORS,
+        "research_weights":
+            RESEARCH_WEIGHTS,
+        "blocked_research_factors":
+            list(
+                BLOCKED_RESEARCH_FACTORS
+            ),
         **audit,
         "files": {
-            "turnaround_research": str(
-                result_path
-            ),
+            "turnaround_research":
+                str(result_path),
         },
     }
 
@@ -911,8 +935,10 @@ def save_turnaround(
         )
 
     return {
-        "turnaround": result_path,
-        "manifest": manifest_path,
+        "turnaround":
+            result_path,
+        "manifest":
+            manifest_path,
     }
 
 
@@ -931,6 +957,7 @@ def _self_test():
                 "4",
                 "5",
             ],
+
             "FUNDAMENTAL_ENGINE_OK": [
                 True,
                 True,
@@ -938,6 +965,7 @@ def _self_test():
                 True,
                 True,
             ],
+
             "INVESTABLE": [
                 True,
                 True,
@@ -945,6 +973,7 @@ def _self_test():
                 True,
                 True,
             ],
+
             "MARGEM_BRUTA": [
                 0.05,
                 0.15,
@@ -952,6 +981,7 @@ def _self_test():
                 0.50,
                 0.80,
             ],
+
             "MARGEM_LIQUIDA": [
                 -0.10,
                 -0.02,
@@ -959,6 +989,7 @@ def _self_test():
                 0.10,
                 0.20,
             ],
+
             "ROE": [
                 -0.10,
                 0.01,
@@ -966,6 +997,7 @@ def _self_test():
                 0.15,
                 0.25,
             ],
+
             "PL_POSITIVO": [
                 True,
                 True,
@@ -973,6 +1005,7 @@ def _self_test():
                 True,
                 True,
             ],
+
             "FCO_POSITIVO": [
                 False,
                 True,
@@ -980,6 +1013,7 @@ def _self_test():
                 True,
                 True,
             ],
+
             "EBIT_POSITIVO": [
                 False,
                 True,
@@ -994,6 +1028,7 @@ def _self_test():
         formation_date = pd.Timestamp(
             "2025-12-31"
         )
+
         accounting_cutoff = pd.Timestamp(
             "2025-09-30"
         )
@@ -1010,16 +1045,50 @@ def _self_test():
     if not (
         indexed.loc[
             "1",
-            "TURNAROUND_RESEARCH_SCORE",
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE",
         ]
         >
         indexed.loc[
             "5",
-            "TURNAROUND_RESEARCH_SCORE",
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE",
         ]
     ):
         raise TurnaroundError(
-            "SELF-TEST: direção da margem bruta incorreta."
+            "SELF-TEST: direção do score 50/30/20 incorreta."
+        )
+
+    # Verifica matematicamente a ponderação.
+    expected_first = (
+        0.50
+        * indexed.loc[
+            "1",
+            "MARGEM_BRUTA_DEPRESSED_SIGNAL",
+        ]
+        +
+        0.30
+        * indexed.loc[
+            "1",
+            "MARGEM_LIQUIDA_DEPRESSED_SIGNAL",
+        ]
+        +
+        0.20
+        * indexed.loc[
+            "1",
+            "ROE_DEPRESSED_SIGNAL",
+        ]
+    )
+
+    actual_first = indexed.loc[
+        "1",
+        "TURNAROUND_RESEARCH_SCORE_COMPLETE",
+    ]
+
+    if not np.isclose(
+        expected_first,
+        actual_first,
+    ):
+        raise TurnaroundError(
+            "SELF-TEST: pesos 50/30/20 incorretos."
         )
 
     if not (
@@ -1030,8 +1099,7 @@ def _self_test():
         "BLOCKED_RESEARCH_ONLY"
     ).all():
         raise TurnaroundError(
-            "SELF-TEST: sinal operacional foi "
-            "liberado indevidamente."
+            "SELF-TEST: sinal operacional liberado indevidamente."
         )
 
     if (
@@ -1044,7 +1112,6 @@ def _self_test():
             "SELF-TEST: retorno futuro utilizado."
         )
 
-    # Fail-safe deve continuar bloqueando retorno futuro real.
     contaminated = sample.copy()
 
     contaminated[
@@ -1060,11 +1127,14 @@ def _self_test():
     future_blocked = False
 
     try:
+
         run_turnaround_engine(
             contaminated,
             FakeContext(),
         )
+
     except TurnaroundIntegrityError:
+
         future_blocked = True
 
     if not future_blocked:
@@ -1089,16 +1159,17 @@ if __name__ == "__main__":
 
     print("Self-test: OK")
     print("Modo: RESEARCH ONLY")
-    print("Principal candidato: MARGEM_BRUTA")
-    print("Direção observada: LOW")
-    print("Margem líquida: CONTEXTO SECUNDÁRIO")
-    print("ROE: CONTEXTO SECUNDÁRIO")
-    print("Baixa margem = compra: NÃO")
-    print("Combinação 3 fatores validada: NÃO")
-    print("Full rule 2022 utilizada: NÃO")
-    print("Multivariado 2018 utilizado: NÃO")
-    print("Retorno futuro: NÃO UTILIZADO")
-    print("Fail-safe de retorno futuro: OK")
-    print("Sinal operacional: BLOQUEADO")
+    print("Score experimental:")
+    print("  MARGEM_BRUTA   = 50%")
+    print("  MARGEM_LIQUIDA = 30%")
+    print("  ROE            = 20%")
+    print("Direção dos três fatores: LOW")
+    print("Retorno futuro usado no cálculo: NÃO")
+    print("Pesos otimizados por retorno futuro: NÃO")
+    print("ESTOQUES: BLOQUEADO")
+    print("DÍVIDA/ATIVO como oportunidade: BLOQUEADO")
+    print("INTANGÍVEL/ATIVO como oportunidade: BLOQUEADO")
+    print("Sinal de compra: NÃO")
+    print("Produção: BLOQUEADA")
     print("Validação temporal adicional: NECESSÁRIA")
     print("=" * 72)
