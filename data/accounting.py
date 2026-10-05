@@ -579,7 +579,8 @@ def _read_statement_files(
     )
 
     files = list_zip_files(
-        zip_path
+        dataset,
+        int(year),
     )
 
     result: dict[str, list[pd.DataFrame]] = {
@@ -606,7 +607,8 @@ def _read_statement_files(
             continue
 
         frame = read_csv_from_zip(
-            zip_path,
+            dataset,
+            int(year),
             filename,
         )
 
@@ -650,11 +652,12 @@ def _read_statement_files(
 # =============================================================================
 
 def _find_fca_security_file(
-    zip_path: Path,
+    year: int,
 ) -> str:
 
     files = list_zip_files(
-        zip_path
+        "FCA",
+        int(year),
     )
 
     candidates = []
@@ -706,11 +709,12 @@ def build_identity_map(
     )
 
     filename = _find_fca_security_file(
-        zip_path
+        int(year)
     )
 
     raw = read_csv_from_zip(
-        zip_path,
+        "FCA",
+        int(year),
         filename,
     )
 
