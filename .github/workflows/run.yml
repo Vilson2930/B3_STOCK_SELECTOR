@@ -22,19 +22,20 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
+      PYTHONUNBUFFERED: "1"
 
     steps:
 
-      # =======================================================================
+      # =====================================================================
       # REPOSITÓRIO
-      # =======================================================================
+      # =====================================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # =======================================================================
+      # =====================================================================
       # PYTHON
-      # =======================================================================
+      # =====================================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -42,18 +43,29 @@ jobs:
           python-version: "3.12"
           cache: "pip"
 
-      # =======================================================================
+      # =====================================================================
       # DEPENDÊNCIAS
-      # =======================================================================
+      # =====================================================================
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # =======================================================================
-      # VALIDAÇÃO DE SINTAXE
-      # =======================================================================
+      # =====================================================================
+      # LIMPEZA DOS OUTPUTS
+      # Evita confundir arquivo antigo com resultado da execução atual.
+      # =====================================================================
+
+      - name: Prepare outputs
+        shell: bash
+        run: |
+          rm -rf outputs
+          mkdir -p outputs
+
+      # =====================================================================
+      # SINTAXE
+      # =====================================================================
 
       - name: Validate Python syntax
         run: |
@@ -64,97 +76,46 @@ jobs:
             engines \
             reports
 
-      # =======================================================================
-      # SELF-TEST — PIT
-      # =======================================================================
+      # =====================================================================
+      # SELF-TESTS
+      # =====================================================================
 
       - name: Test PIT Engine
-        run: |
-          python -m data.pit
-
-      # =======================================================================
-      # SELF-TEST — MARKET
-      # =======================================================================
+        run: python -m data.pit
 
       - name: Test Market Engine
-        run: |
-          python -m data.market
-
-      # =======================================================================
-      # SELF-TEST — UNIVERSE
-      # =======================================================================
+        run: python -m data.market
 
       - name: Test Universe Engine
-        run: |
-          python -m engines.universe
-
-      # =======================================================================
-      # SELF-TEST — INVESTABILITY
-      # =======================================================================
+        run: python -m engines.universe
 
       - name: Test Investability Engine
-        run: |
-          python -m engines.investability
-
-      # =======================================================================
-      # SELF-TEST — FUNDAMENTALS
-      # =======================================================================
+        run: python -m engines.investability
 
       - name: Test Fundamentals Engine
-        run: |
-          python -m engines.fundamentals
-
-      # =======================================================================
-      # SELF-TEST — QUALITY
-      # =======================================================================
+        run: python -m engines.fundamentals
 
       - name: Test Quality Engine
-        run: |
-          python -m engines.quality
-
-      # =======================================================================
-      # SELF-TEST — TURNAROUND
-      # =======================================================================
+        run: python -m engines.quality
 
       - name: Test Turnaround Engine
-        run: |
-          python -m engines.turnaround
-
-      # =======================================================================
-      # SELF-TEST — VALUATION
-      # =======================================================================
+        run: python -m engines.turnaround
 
       - name: Test Valuation Engine
-        run: |
-          python -m engines.valuation
-
-      # =======================================================================
-      # SELF-TEST — RANKING
-      # =======================================================================
+        run: python -m engines.valuation
 
       - name: Test Ranking Engine
-        run: |
-          python -m engines.ranking
-
-      # =======================================================================
-      # SELF-TEST — RISK
-      # =======================================================================
+        run: python -m engines.ranking
 
       - name: Test Risk Engine
-        run: |
-          python -m engines.risk
-
-      # =======================================================================
-      # SELF-TEST — REPORT
-      # =======================================================================
+        run: python -m engines.risk
 
       - name: Test Report Engine
-        run: |
-          python -m reports.report
+        run: python -m reports.report
 
-      # =======================================================================
-      # CONFIG
-      # =======================================================================
+      # =====================================================================
+      # CONFIGURAÇÃO
+      # =====================================================================
 
       - name: Validate configuration
         run: |
@@ -172,17 +133,9 @@ jobs:
           print("=" * 72)
           PY
 
-      # =======================================================================
-      # MAIN
-      # =======================================================================
-
-      - name: Validate Main Pipeline
-        run: |
-          python -m main
-
-      # =======================================================================
+      # =====================================================================
       # TURNAROUND SAFETY LOCK
-      # =======================================================================
+      # =====================================================================
 
       - name: Validate Turnaround production lock
         run: |
@@ -220,9 +173,9 @@ jobs:
           print("=" * 72)
           PY
 
-      # =======================================================================
+      # =====================================================================
       # AUDITORIA FUTURE RETURN
-      # =======================================================================
+      # =====================================================================
 
       - name: Audit future-return references
         shell: bash
@@ -238,47 +191,148 @@ jobs:
 
           echo "============================================================"
           echo "Audit completed."
-          echo "References above must correspond only to fail-safe/audit logic."
+          echo "References above devem ser somente fail-safe/auditoria."
           echo "============================================================"
 
-      # =======================================================================
-      # OUTPUTS
-      # =======================================================================
+      # =====================================================================
+      # PIPELINE REAL
+      #
+      # IMPORTANTE:
+      # main.py deve executar a rotina real quando chamado com --run.
+      # Se essa interface ainda não existir, o erro aparecerá aqui,
+      # em vez de produzir falsamente uma execução verde sem carteira.
+      # =====================================================================
+
+      - name: Run production pipeline
+        run: |
+          echo "============================================================"
+          echo "B3 STOCK SELECTOR — PRODUCTION RUN"
+          echo "============================================================"
+
+          python main.py --run
+
+          echo "============================================================"
+          echo "Production pipeline finished."
+          echo "============================================================"
+
+      # =====================================================================
+      # VERIFICAÇÃO DOS RESULTADOS
+      #
+      # Não permite execução verde sem nenhum resultado.
+      # =====================================================================
+
+      - name: Validate generated outputs
+        shell: bash
+        run: |
+          echo "============================================================"
+          echo "GENERATED OUTPUTS"
+          echo "============================================================"
+
+          if [ ! -d "outputs" ]; then
+            echo "FAIL-SAFE: diretório outputs não existe."
+            exit 1
+          fi
+
+          find outputs -type f -print | sort
+
+          FILE_COUNT="$(find outputs -type f | wc -l)"
+
+          echo ""
+          echo "Arquivos encontrados: ${FILE_COUNT}"
+
+          if [ "${FILE_COUNT}" -eq 0 ]; then
+            echo "FAIL-SAFE: pipeline terminou sem gerar arquivos."
+            exit 1
+          fi
+
+          PORTFOLIO_COUNT="$(
+            find outputs -type f \
+              \( -iname 'portfolio_*.csv' -o -iname '*portfolio*.csv' \) \
+              | wc -l
+          )"
+
+          REPORT_COUNT="$(
+            find outputs -type f \
+              \( -iname '*.html' -o -iname '*report*.html' \) \
+              | wc -l
+          )"
+
+          echo "Portfolio CSV encontrados: ${PORTFOLIO_COUNT}"
+          echo "Relatórios HTML encontrados: ${REPORT_COUNT}"
+
+          if [ "${PORTFOLIO_COUNT}" -eq 0 ]; then
+            echo "FAIL-SAFE: portfolio CSV não foi gerado."
+            exit 1
+          fi
+
+          if [ "${REPORT_COUNT}" -eq 0 ]; then
+            echo "FAIL-SAFE: relatório HTML não foi gerado."
+            exit 1
+          fi
+
+          echo "============================================================"
+          echo "OUTPUT VALIDATION: OK"
+          echo "============================================================"
+
+      # =====================================================================
+      # ARTIFACT
+      #
+      # Agora não usa mais "ignore".
+      # Se não houver arquivo, queremos saber.
+      # =====================================================================
 
       - name: Upload outputs
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: b3-stock-selector-${{ github.run_number }}
-          path: |
-            outputs/
-          if-no-files-found: ignore
+          path: outputs/
+          if-no-files-found: error
           retention-days: 30
 
-      # =======================================================================
+      # =====================================================================
       # RESUMO
-      # =======================================================================
+      # =====================================================================
 
       - name: Execution summary
         if: success()
+        shell: bash
         run: |
           echo "## B3 STOCK SELECTOR" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Sintaxe validada" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ PIT validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Market validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Universe validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Investability validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Fundamentals validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Quality validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Turnaround Research validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Valuation validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Ranking validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Risk validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Report validado" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Execução" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Pipeline executado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Outputs gerados" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Artifact publicado" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Motores" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ PIT" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Market" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Universe" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Investability" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Fundamentals" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Quality" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Turnaround Research" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Valuation" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Ranking" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Risk" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Segurança metodológica" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Turnaround:** Research Only" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Future return na execução:** NÃO" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "**Look-ahead:** BLOQUEADO" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          echo "### Arquivos produzidos" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          find outputs -type f -print | sort >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
