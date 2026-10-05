@@ -2,47 +2,23 @@
 # B3 STOCK SELECTOR
 # Arquivo: engines/investability.py
 #
-# INVESTABILITY / SAFETY GATE
+# INVESTABILITY ENGINE
 #
 # OBJETIVO:
-# Antes de procurar oportunidades, verificar se a empresa possui condições
-# mínimas para ser analisada pelo robô.
-#
-# RESPONSABILIDADE:
-# - Validar identidade do emissor
-# - Validar dados de mercado
-# - Validar dados fundamentais mínimos
-# - Validar conformidade PIT
-# - Controlar missing data
-# - Separar instituições financeiras do modelo fundamental padrão
-# - Registrar exclusões e motivos
+# Aplicar gates mínimos de integridade antes que um emissor possa seguir para
+# Fundamentals → Quality / Turnaround / Valuation.
 #
 # NÃO FAZ:
-# - Quality Score
-# - Turnaround Score
-# - Valuation
-# - Ranking
-# - Previsão de retorno
-# - Uso de retorno futuro
-#
-# FILOSOFIA:
-# O Investability Engine é um GATE, não um score.
-#
-# Uma empresa:
-#
-#     PASSA
-#       ou
-#     NÃO PASSA
-#
-# Nenhuma empresa recebe pontos extras por simplesmente cumprir requisitos
-# mínimos de segurança.
+# - ranking;
+# - scoring;
+# - descoberta de fatores;
+# - uso de retorno futuro.
 # =============================================================================
 
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Iterable, Optional
 
 import numpy as np
@@ -54,11 +30,8 @@ import pandas as pd
 # =============================================================================
 
 try:
-    from config import (
-        OUTPUT_DIR,
-        INVESTABILITY,
-        EXCLUDE_FINANCIALS_FROM_STANDARD_FUNDAMENTAL_MODEL,
-    )
+    import config as project_config
+    from config import OUTPUT_DIR
 
 except ImportError as exc:
     raise RuntimeError(
@@ -75,8 +48,30 @@ except ImportError as exc:
     ) from exc
 
 
+INVESTABILITY_CONFIG = getattr(
+    project_config,
+    "INVESTABILITY",
+    {},
+)
+
+if not isinstance(
+    INVESTABILITY_CONFIG,
+    dict,
+):
+    INVESTABILITY_CONFIG = {}
+
+
+EXCLUDE_FINANCIALS = bool(
+    getattr(
+        project_config,
+        "EXCLUDE_FINANCIALS_FROM_STANDARD_FUNDAMENTAL_MODEL",
+        True,
+    )
+)
+
+
 # =============================================================================
-# DIRETÓRIOS
+# DIRETÓRIO
 # =============================================================================
 
 INVESTABILITY_DIR = (
@@ -95,32 +90,40 @@ INVESTABILITY_DIR.mkdir(
 # =============================================================================
 
 class InvestabilityError(RuntimeError):
-    """Erro geral do Investability Engine."""
+    pass
 
 
 class InvestabilityIntegrityError(InvestabilityError):
-    """Erro estrutural ou de integridade."""
-
-
-class InvestabilityPITError(InvestabilityError):
-    """Violação Point-in-Time."""
+    pass
 
 
 # =============================================================================
-# STATUS
+# FUNDAMENTOS MÍNIMOS
 # =============================================================================
 
-STATUS_PASS = "PASS"
-STATUS_FAIL = "FAIL"
+DEFAULT_REQUIRED_FUNDAMENTALS = (
+    "ATIVO_TOTAL",
+    "PL",
+    "RECEITA",
+)
 
-REASON_OK = "OK"
 
-REASON_IDENTITY = "IDENTITY_NOT_RESOLVED"
-REASON_MARKET = "MARKET_DATA_INVALID"
-REASON_PIT = "PIT_VIOLATION"
-REASON_FINANCIAL = "FINANCIAL_SPECIAL_MODEL_REQUIRED"
-REASON_FUNDAMENTALS = "FUNDAMENTAL_DATA_INSUFFICIENT"
-REASON_DUPLICATE = "DUPLICATE_ISSUER"
+# =============================================================================
+# PROTEÇÃO CONTRA FUTURO
+# =============================================================================
+
+FORBIDDEN_TERMS = (
+    "FUTURE_RETURN",
+    "RETORNO_FUTURO",
+    "RETURN_FUTURE",
+    "FUTURE_WINNER",
+    "WINNER_LABEL",
+    "TARGET_RETURN",
+)
+
+ALLOWED_METADATA = {
+    "FUTURE_RETURN_USED",
+}
 
 
 # =============================================================================
@@ -128,6 +131,7 @@ REASON_DUPLICATE = "DUPLICATE_ISSUER"
 # =============================================================================
 
 def _utc_now_iso() -> str:
+
     return datetime.now(
         timezone.utc
     ).isoformat()
@@ -163,27 +167,30 @@ def _require_columns(
         name,
     )
 
-    missing = (
-        set(columns)
-        - set(df.columns)
+    columns = list(
+        columns
     )
+
+    missing = [
+        column
+        for column in columns
+        if column not in df.columns
+    ]
 
     if missing:
         raise InvestabilityIntegrityError(
             f"FAIL-SAFE: {name} sem colunas obrigatórias: "
-            f"{sorted(missing)}"
+            f"{missing}"
         )
 
-
-# =============================================================================
-# NORMALIZAÇÃO ISSUER ID
-# =============================================================================
 
 def _normalize_issuer_id(
     value,
 ):
 
-    if pd.isna(value):
+    if pd.isna(
+        value
+    ):
         return None
 
     value = str(
@@ -200,13 +207,45 @@ def _normalize_issuer_id(
 
         if numeric.is_integer():
             return str(
-                int(numeric)
+                int(
+                    numeric
+                )
             )
 
     except Exception:
         pass
 
     return value
+
+
+def assert_no_future_information(
+    df: pd.DataFrame,
+) -> None:
+
+    forbidden = []
+
+    for column in df.columns:
+
+        normalized = str(
+            column
+        ).upper()
+
+        if normalized in ALLOWED_METADATA:
+            continue
+
+        if any(
+            term in normalized
+            for term in FORBIDDEN_TERMS
+        ):
+            forbidden.append(
+                column
+            )
+
+    if forbidden:
+        raise InvestabilityIntegrityError(
+            "FAIL-SAFE: informação futura detectada: "
+            f"{forbidden}"
+        )
 
 
 # =============================================================================
@@ -217,18 +256,22 @@ def prepare_issuer_universe(
     issuer_universe: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    required = {
+    required = (
         "ISSUER_ID",
         "TICKERS",
         "N_SECURITIES",
         "IS_FINANCIAL",
         "FUNDAMENTAL_ELIGIBLE",
-    }
+    )
 
     _require_columns(
         issuer_universe,
         required,
         "issuer_universe",
+    )
+
+    assert_no_future_information(
+        issuer_universe
     )
 
     result = (
@@ -255,32 +298,18 @@ def prepare_issuer_universe(
         .any()
     ):
         raise InvestabilityIntegrityError(
-            "FAIL-SAFE: ISSUER_ID ausente no universo."
+            "FAIL-SAFE: ISSUER_ID ausente."
         )
 
-    duplicate = (
+    if (
         result[
             "ISSUER_ID"
         ]
-        .duplicated(
-            keep=False
-        )
-    )
-
-    if duplicate.any():
-
-        examples = (
-            result.loc[
-                duplicate,
-                "ISSUER_ID",
-            ]
-            .head(20)
-            .tolist()
-        )
-
+        .duplicated()
+        .any()
+    ):
         raise InvestabilityIntegrityError(
-            "FAIL-SAFE: emissor duplicado no universo. "
-            f"Exemplos={examples}"
+            "FAIL-SAFE: emissor duplicado."
         )
 
     return result
@@ -296,10 +325,16 @@ def prepare_fundamentals(
 
     _require_columns(
         fundamentals,
-        ["ISSUER_ID"],
+        (
+            "ISSUER_ID",
+        ),
         "fundamentals",
     )
 
+    assert_no_future_information(
+        fundamentals
+    )
+
     result = (
         fundamentals
         .copy()
@@ -315,762 +350,6 @@ def prepare_fundamentals(
             _normalize_issuer_id
         )
     )
-
-    result = result.loc[
-        result[
-            "ISSUER_ID"
-        ]
-        .notna()
-    ].copy()
-
-    if result.empty:
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: nenhuma empresa válida "
-            "nos fundamentos."
-        )
-
-    duplicates = (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated(
-            keep=False
-        )
-    )
-
-    if duplicates.any():
-
-        examples = (
-            result.loc[
-                duplicates,
-                "ISSUER_ID",
-            ]
-            .head(20)
-            .tolist()
-        )
-
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: fundamentos possuem múltiplas "
-            "linhas por emissor. "
-            f"Exemplos={examples}"
-        )
-
-    return result
-
-
-# =============================================================================
-# COLUNAS FUNDAMENTAIS MÍNIMAS
-#
-# IMPORTANTE:
-# Estes campos não significam que serão utilizados no ranking.
-#
-# Servem apenas para confirmar que existe informação contábil suficiente
-# para que os motores seguintes façam sua análise.
-# =============================================================================
-
-DEFAULT_REQUIRED_FUNDAMENTALS = (
-    "ATIVO_TOTAL",
-    "PL",
-    "RECEITA",
-)
-
-
-# =============================================================================
-# VALIDAÇÃO PIT DOS FUNDAMENTOS
-# =============================================================================
-
-def validate_fundamental_pit(
-    df: pd.DataFrame,
-    context: PITContext,
-) -> pd.Series:
-    """
-    Retorna True/False por empresa.
-
-    Procura, em ordem de prioridade, colunas que indiquem
-    explicitamente a data máxima usada na construção dos fundamentos.
-
-    O engine NÃO assume silenciosamente que os dados são PIT.
-    """
-
-    candidate_columns = (
-        "ACCOUNTING_CUTOFF",
-        "PIT_CUTOFF",
-        "DATA_CORTE",
-        "REFERENCE_DATE",
-        "DT_REFER",
-    )
-
-    selected_column = None
-
-    for column in candidate_columns:
-
-        if column in df.columns:
-            selected_column = column
-            break
-
-    if selected_column is None:
-
-        # Se o pipeline anterior já marcou explicitamente PIT válido,
-        # essa evidência pode ser usada.
-        if "PIT_VALID" in df.columns:
-
-            raw = df[
-                "PIT_VALID"
-            ]
-
-            if pd.api.types.is_bool_dtype(
-                raw
-            ):
-                return (
-                    raw
-                    .fillna(False)
-                    .astype(bool)
-                )
-
-            normalized = (
-                raw
-                .fillna("")
-                .astype(str)
-                .str.strip()
-                .str.upper()
-            )
-
-            return normalized.isin(
-                {
-                    "TRUE",
-                    "1",
-                    "YES",
-                    "SIM",
-                    "OK",
-                    "VALID",
-                }
-            )
-
-        raise InvestabilityPITError(
-            "FAIL-SAFE: fundamentos não possuem "
-            "evidência temporal suficiente para validar PIT."
-        )
-
-    dates = pd.to_datetime(
-        df[
-            selected_column
-        ],
-        errors="coerce",
-    )
-
-    valid_date = (
-        dates.notna()
-        &
-        (
-            dates.dt.normalize()
-            <= context.accounting_cutoff
-        )
-    )
-
-    return valid_date
-
-
-# =============================================================================
-# COBERTURA FUNDAMENTAL
-# =============================================================================
-
-def fundamental_coverage(
-    df: pd.DataFrame,
-    required_columns: Iterable[str],
-) -> pd.DataFrame:
-    """
-    Calcula cobertura dos campos fundamentais mínimos.
-    """
-
-    required_columns = list(
-        required_columns
-    )
-
-    missing_columns = [
-        column
-        for column in required_columns
-        if column not in df.columns
-    ]
-
-    if missing_columns:
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: fundamentos sem campos mínimos: "
-            f"{missing_columns}"
-        )
-
-    result = pd.DataFrame(
-        index=df.index
-    )
-
-    available = (
-        df[
-            required_columns
-        ]
-        .notna()
-    )
-
-    result[
-        "FUNDAMENTAL_FIELDS_REQUIRED"
-    ] = len(
-        required_columns
-    )
-
-    result[
-        "FUNDAMENTAL_FIELDS_AVAILABLE"
-    ] = (
-        available
-        .sum(
-            axis=1
-        )
-        .astype(int)
-    )
-
-    if len(
-        required_columns
-    ) == 0:
-
-        result[
-            "FUNDAMENTAL_COVERAGE"
-        ] = 1.0
-
-    else:
-
-        result[
-            "FUNDAMENTAL_COVERAGE"
-        ] = (
-            result[
-                "FUNDAMENTAL_FIELDS_AVAILABLE"
-            ]
-            / len(
-                required_columns
-            )
-        )
-
-    result[
-        "FUNDAMENTAL_COMPLETE"
-    ] = (
-        result[
-            "FUNDAMENTAL_FIELDS_AVAILABLE"
-        ]
-        ==
-        result[
-            "FUNDAMENTAL_FIELDS_REQUIRED"
-        ]
-    )
-
-    return result
-
-
-# =============================================================================
-# VALIDAÇÃO DO MERCADO POR EMISSOR
-# =============================================================================
-
-def market_identity_status(
-    security_universe: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Consolida o estado de mercado por emissor.
-
-    O Investability Gate não escolhe a melhor classe.
-    Apenas verifica se o emissor possui pelo menos uma security
-    negociável e válida.
-    """
-
-    required = {
-        "ISSUER_ID",
-        "TICKER",
-        "FORMATION_PRICE",
-        "FORMATION_PRICE_DATE",
-        "IDENTITY_RESOLVED",
-    }
-
-    _require_columns(
-        security_universe,
-        required,
-        "security_universe",
-    )
-
-    data = (
-        security_universe
-        .copy()
-    )
-
-    data[
-        "ISSUER_ID"
-    ] = (
-        data[
-            "ISSUER_ID"
-        ]
-        .map(
-            _normalize_issuer_id
-        )
-    )
-
-    prices = pd.to_numeric(
-        data[
-            "FORMATION_PRICE"
-        ],
-        errors="coerce",
-    )
-
-    dates = pd.to_datetime(
-        data[
-            "FORMATION_PRICE_DATE"
-        ],
-        errors="coerce",
-    )
-
-    data[
-        "__MARKET_VALID"
-    ] = (
-        data[
-            "IDENTITY_RESOLVED"
-        ].fillna(False)
-        &
-        prices.notna()
-        &
-        (prices > 0)
-        &
-        dates.notna()
-    )
-
-    resolved = data.loc[
-        data[
-            "ISSUER_ID"
-        ]
-        .notna()
-    ].copy()
-
-    if resolved.empty:
-
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: nenhuma security ligada a emissor."
-        )
-
-    grouped = (
-        resolved
-        .groupby(
-            "ISSUER_ID",
-            as_index=False,
-        )
-        .agg(
-            MARKET_SECURITIES=(
-                "TICKER",
-                "nunique",
-            ),
-            MARKET_DATA_OK=(
-                "__MARKET_VALID",
-                "max",
-            ),
-        )
-    )
-
-    grouped[
-        "MARKET_DATA_OK"
-    ] = (
-        grouped[
-            "MARKET_DATA_OK"
-        ]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    return grouped
-
-
-# =============================================================================
-# MOTOR PRINCIPAL
-# =============================================================================
-
-def run_investability_gate(
-    issuer_universe: pd.DataFrame,
-    security_universe: pd.DataFrame,
-    fundamentals: pd.DataFrame,
-    context: PITContext,
-    *,
-    required_fundamentals: Optional[
-        Iterable[str]
-    ] = None,
-) -> pd.DataFrame:
-    """
-    Executa o gate de investabilidade.
-
-    Resultado:
-        uma linha por emissor.
-
-    INVESTABLE=True somente quando todos os requisitos mínimos
-    aplicáveis forem satisfeitos.
-    """
-
-    if required_fundamentals is None:
-        required_fundamentals = (
-            DEFAULT_REQUIRED_FUNDAMENTALS
-        )
-
-    required_fundamentals = tuple(
-        required_fundamentals
-    )
-
-    issuers = prepare_issuer_universe(
-        issuer_universe
-    )
-
-    fundamental_data = prepare_fundamentals(
-        fundamentals
-    )
-
-    market_status = market_identity_status(
-        security_universe
-    )
-
-    # -------------------------------------------------------------------------
-    # JUNÇÃO UNIVERSO + MERCADO
-    # -------------------------------------------------------------------------
-
-    result = issuers.merge(
-        market_status,
-        on="ISSUER_ID",
-        how="left",
-        validate="one_to_one",
-    )
-
-    # -------------------------------------------------------------------------
-    # JUNÇÃO COM FUNDAMENTOS
-    # -------------------------------------------------------------------------
-
-    fundamental_columns = [
-        column
-        for column in fundamental_data.columns
-        if column != "ISSUER_ID"
-    ]
-
-    result = result.merge(
-        fundamental_data[
-            [
-                "ISSUER_ID",
-                *fundamental_columns,
-            ]
-        ],
-        on="ISSUER_ID",
-        how="left",
-        validate="one_to_one",
-        suffixes=(
-            "",
-            "_FUND",
-        ),
-    )
-
-    # -------------------------------------------------------------------------
-    # IDENTIDADE
-    # -------------------------------------------------------------------------
-
-    result[
-        "IDENTITY_OK"
-    ] = (
-        result[
-            "ISSUER_ID"
-        ]
-        .notna()
-    )
-
-    # -------------------------------------------------------------------------
-    # MERCADO
-    # -------------------------------------------------------------------------
-
-    result[
-        "MARKET_DATA_OK"
-    ] = (
-        result[
-            "MARKET_DATA_OK"
-        ]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    # -------------------------------------------------------------------------
-    # EXISTÊNCIA DE FUNDAMENTOS
-    # -------------------------------------------------------------------------
-
-    result[
-        "FUNDAMENTAL_RECORD_FOUND"
-    ] = (
-        result[
-            required_fundamentals
-        ]
-        .notna()
-        .any(
-            axis=1
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # COBERTURA
-    # -------------------------------------------------------------------------
-
-    coverage = fundamental_coverage(
-        result,
-        required_fundamentals,
-    )
-
-    for column in coverage.columns:
-
-        result[
-            column
-        ] = coverage[
-            column
-        ]
-
-    # -------------------------------------------------------------------------
-    # PIT
-    # -------------------------------------------------------------------------
-
-    result[
-        "PIT_OK"
-    ] = False
-
-    has_fundamental = (
-        result[
-            "FUNDAMENTAL_RECORD_FOUND"
-        ]
-    )
-
-    if has_fundamental.any():
-
-        pit_subset = (
-            result.loc[
-                has_fundamental
-            ]
-            .copy()
-        )
-
-        pit_valid = validate_fundamental_pit(
-            pit_subset,
-            context,
-        )
-
-        result.loc[
-            has_fundamental,
-            "PIT_OK",
-        ] = (
-            pit_valid
-            .fillna(False)
-            .astype(bool)
-            .values
-        )
-
-    # -------------------------------------------------------------------------
-    # FINANCEIRO
-    # -------------------------------------------------------------------------
-
-    result[
-        "FINANCIAL_MODEL_OK"
-    ] = True
-
-    if (
-        EXCLUDE_FINANCIALS_FROM_STANDARD_FUNDAMENTAL_MODEL
-    ):
-
-        result[
-            "FINANCIAL_MODEL_OK"
-        ] = (
-            ~result[
-                "IS_FINANCIAL"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-    # -------------------------------------------------------------------------
-    # REGRAS CONFIGURADAS
-    # -------------------------------------------------------------------------
-
-    conditions = []
-
-    if INVESTABILITY.get(
-        "require_valid_issuer",
-        True,
-    ):
-        conditions.append(
-            result[
-                "IDENTITY_OK"
-            ]
-        )
-
-    if INVESTABILITY.get(
-        "require_market_price",
-        True,
-    ):
-        conditions.append(
-            result[
-                "MARKET_DATA_OK"
-            ]
-        )
-
-    if INVESTABILITY.get(
-        "require_fundamental_data",
-        True,
-    ):
-        conditions.append(
-            result[
-                "FUNDAMENTAL_COMPLETE"
-            ]
-        )
-
-    if INVESTABILITY.get(
-        "require_pit_compliance",
-        True,
-    ):
-        conditions.append(
-            result[
-                "PIT_OK"
-            ]
-        )
-
-    conditions.append(
-        result[
-            "FINANCIAL_MODEL_OK"
-        ]
-    )
-
-    if not conditions:
-
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: nenhuma regra de investabilidade configurada."
-        )
-
-    investable = pd.Series(
-        True,
-        index=result.index,
-        dtype=bool,
-    )
-
-    for condition in conditions:
-
-        investable &= (
-            condition
-            .fillna(False)
-            .astype(bool)
-        )
-
-    result[
-        "INVESTABLE"
-    ] = investable
-
-    result[
-        "INVESTABILITY_STATUS"
-    ] = np.where(
-        result[
-            "INVESTABLE"
-        ],
-        STATUS_PASS,
-        STATUS_FAIL,
-    )
-
-    # -------------------------------------------------------------------------
-    # MOTIVOS
-    # -------------------------------------------------------------------------
-
-    def exclusion_reasons(
-        row,
-    ) -> str:
-
-        reasons = []
-
-        if not bool(
-            row[
-                "IDENTITY_OK"
-            ]
-        ):
-            reasons.append(
-                REASON_IDENTITY
-            )
-
-        if not bool(
-            row[
-                "MARKET_DATA_OK"
-            ]
-        ):
-            reasons.append(
-                REASON_MARKET
-            )
-
-        if not bool(
-            row[
-                "FUNDAMENTAL_COMPLETE"
-            ]
-        ):
-            reasons.append(
-                REASON_FUNDAMENTALS
-            )
-
-        if not bool(
-            row[
-                "PIT_OK"
-            ]
-        ):
-            reasons.append(
-                REASON_PIT
-            )
-
-        if not bool(
-            row[
-                "FINANCIAL_MODEL_OK"
-            ]
-        ):
-            reasons.append(
-                REASON_FINANCIAL
-            )
-
-        if not reasons:
-            return REASON_OK
-
-        return "|".join(
-            reasons
-        )
-
-    result[
-        "INVESTABILITY_REASON"
-    ] = (
-        result.apply(
-            exclusion_reasons,
-            axis=1,
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # METADADOS
-    # -------------------------------------------------------------------------
-
-    result[
-        "FORMATION_DATE"
-    ] = context.formation_date
-
-    result[
-        "ACCOUNTING_CUTOFF"
-    ] = context.accounting_cutoff
-
-    result[
-        "MARKET_CUTOFF"
-    ] = context.market_cutoff
-
-    result[
-        "FUTURE_RETURN_USED"
-    ] = False
-
-    result = (
-        result
-        .sort_values(
-            "ISSUER_ID",
-            kind="mergesort",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # FAIL-SAFE FINAL
-    # -------------------------------------------------------------------------
 
     if (
         result[
@@ -1080,15 +359,549 @@ def run_investability_gate(
         .any()
     ):
         raise InvestabilityIntegrityError(
-            "FAIL-SAFE: emissor duplicado após Investability Gate."
-        )
-
-    if result.empty:
-        raise InvestabilityIntegrityError(
-            "FAIL-SAFE: resultado do Investability Gate vazio."
+            "FAIL-SAFE: fundamentals possui "
+            "mais de uma linha por emissor."
         )
 
     return result
+
+
+# =============================================================================
+# PIT DOS FUNDAMENTOS
+# =============================================================================
+
+def validate_fundamental_pit(
+    df: pd.DataFrame,
+    context: PITContext,
+) -> pd.Series:
+
+    cutoff_candidates = (
+        "ACCOUNTING_CUTOFF",
+        "PIT_CUTOFF",
+        "DATA_CORTE",
+        "REFERENCE_DATE",
+        "DT_REFER",
+    )
+
+    for column in cutoff_candidates:
+
+        if column not in df.columns:
+            continue
+
+        dates = pd.to_datetime(
+            df[
+                column
+            ],
+            errors="coerce",
+        )
+
+        return (
+            dates.notna()
+            &
+            (
+                dates
+                <=
+                pd.Timestamp(
+                    context.accounting_cutoff
+                )
+            )
+        )
+
+    if "PIT_VALID" in df.columns:
+
+        return (
+            df[
+                "PIT_VALID"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
+
+    raise InvestabilityIntegrityError(
+        "FAIL-SAFE: não há evidência PIT "
+        "na base fundamental."
+    )
+
+
+# =============================================================================
+# COBERTURA FUNDAMENTAL
+# =============================================================================
+
+def fundamental_coverage(
+    df: pd.DataFrame,
+    required_fields: Iterable[str] = DEFAULT_REQUIRED_FUNDAMENTALS,
+) -> pd.Series:
+    """
+    CORREÇÃO IMPORTANTE:
+
+    required_fields originalmente é uma tuple:
+        ("ATIVO_TOTAL", "PL", "RECEITA")
+
+    Para selecionar múltiplas colunas no pandas é necessário utilizar LIST:
+        df[["ATIVO_TOTAL", "PL", "RECEITA"]]
+
+    e não:
+        df[("ATIVO_TOTAL", "PL", "RECEITA")]
+    """
+
+    required_fields = list(
+        required_fields
+    )
+
+    _require_columns(
+        df,
+        required_fields,
+        "fundamentals",
+    )
+
+    coverage = (
+        df[
+            required_fields
+        ]
+        .notna()
+        .all(
+            axis=1
+        )
+    )
+
+    return coverage
+
+
+# =============================================================================
+# STATUS DE MERCADO / IDENTIDADE
+# =============================================================================
+
+def market_identity_status(
+    security_universe: pd.DataFrame,
+) -> pd.DataFrame:
+
+    required = (
+        "ISSUER_ID",
+        "TICKER",
+        "FORMATION_PRICE",
+        "FORMATION_PRICE_DATE",
+        "IDENTITY_RESOLVED",
+    )
+
+    _require_columns(
+        security_universe,
+        required,
+        "security_universe",
+    )
+
+    assert_no_future_information(
+        security_universe
+    )
+
+    temp = (
+        security_universe
+        .copy()
+    )
+
+    temp[
+        "ISSUER_ID"
+    ] = (
+        temp[
+            "ISSUER_ID"
+        ]
+        .map(
+            _normalize_issuer_id
+        )
+    )
+
+    temp[
+        "_MARKET_VALID"
+    ] = (
+        pd.to_numeric(
+            temp[
+                "FORMATION_PRICE"
+            ],
+            errors="coerce",
+        )
+        .gt(
+            0
+        )
+        &
+        pd.to_datetime(
+            temp[
+                "FORMATION_PRICE_DATE"
+            ],
+            errors="coerce",
+        )
+        .notna()
+    )
+
+    temp[
+        "_IDENTITY_VALID"
+    ] = (
+        temp[
+            "IDENTITY_RESOLVED"
+        ]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    result = (
+        temp
+        .groupby(
+            "ISSUER_ID",
+            as_index=False,
+        )
+        .agg(
+            MARKET_VALID=(
+                "_MARKET_VALID",
+                "any",
+            ),
+            IDENTITY_VALID=(
+                "_IDENTITY_VALID",
+                "all",
+            ),
+        )
+    )
+
+    return result
+
+
+# =============================================================================
+# GATE PRINCIPAL
+# =============================================================================
+
+def run_investability_gate(
+    issuer_universe: pd.DataFrame,
+    security_universe: pd.DataFrame,
+    fundamentals: pd.DataFrame,
+    context: PITContext,
+    required_fundamentals: Iterable[str] = DEFAULT_REQUIRED_FUNDAMENTALS,
+) -> pd.DataFrame:
+
+    issuers = prepare_issuer_universe(
+        issuer_universe
+    )
+
+    fundamental = prepare_fundamentals(
+        fundamentals
+    )
+
+    market = market_identity_status(
+        security_universe
+    )
+
+    # =========================================================================
+    # COBERTURA
+    # =========================================================================
+
+    fundamental[
+        "FUNDAMENTAL_COMPLETE"
+    ] = fundamental_coverage(
+        fundamental,
+        required_fundamentals,
+    )
+
+    fundamental[
+        "FUNDAMENTAL_PIT_VALID"
+    ] = validate_fundamental_pit(
+        fundamental,
+        context,
+    )
+
+    # =========================================================================
+    # MERGE
+    # =========================================================================
+
+    result = (
+        issuers
+        .merge(
+            market,
+            on="ISSUER_ID",
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            fundamental,
+            on="ISSUER_ID",
+            how="left",
+            validate="one_to_one",
+            suffixes=(
+                "",
+                "_FUND",
+            ),
+        )
+    )
+
+    # =========================================================================
+    # NORMALIZAÇÃO
+    # =========================================================================
+
+    for column in (
+        "MARKET_VALID",
+        "IDENTITY_VALID",
+        "FUNDAMENTAL_COMPLETE",
+        "FUNDAMENTAL_PIT_VALID",
+        "FUNDAMENTAL_ELIGIBLE",
+        "IS_FINANCIAL",
+    ):
+
+        if column not in result.columns:
+            result[
+                column
+            ] = False
+
+        result[
+            column
+        ] = (
+            result[
+                column
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
+
+    # =========================================================================
+    # REGRAS CONFIGURÁVEIS
+    # =========================================================================
+
+    require_identity = bool(
+        INVESTABILITY_CONFIG.get(
+            "require_identity",
+            True,
+        )
+    )
+
+    require_market = bool(
+        INVESTABILITY_CONFIG.get(
+            "require_market",
+            True,
+        )
+    )
+
+    require_fundamentals = bool(
+        INVESTABILITY_CONFIG.get(
+            "require_fundamentals",
+            True,
+        )
+    )
+
+    require_pit = bool(
+        INVESTABILITY_CONFIG.get(
+            "require_pit",
+            True,
+        )
+    )
+
+    # =========================================================================
+    # CONDIÇÕES
+    # =========================================================================
+
+    conditions = []
+
+    if require_identity:
+        conditions.append(
+            result[
+                "IDENTITY_VALID"
+            ]
+        )
+
+    if require_market:
+        conditions.append(
+            result[
+                "MARKET_VALID"
+            ]
+        )
+
+    if require_fundamentals:
+        conditions.append(
+            result[
+                "FUNDAMENTAL_COMPLETE"
+            ]
+        )
+
+    if require_pit:
+        conditions.append(
+            result[
+                "FUNDAMENTAL_PIT_VALID"
+            ]
+        )
+
+    # Respeita a elegibilidade fundamental já definida pelo Universe Engine.
+    conditions.append(
+        result[
+            "FUNDAMENTAL_ELIGIBLE"
+        ]
+    )
+
+    # Financeiras permanecem fora do modelo fundamental padrão.
+    if EXCLUDE_FINANCIALS:
+
+        conditions.append(
+            ~result[
+                "IS_FINANCIAL"
+            ]
+        )
+
+    if not conditions:
+
+        investable = pd.Series(
+            True,
+            index=result.index,
+        )
+
+    else:
+
+        investable = conditions[0].copy()
+
+        for condition in conditions[1:]:
+
+            investable = (
+                investable
+                &
+                condition
+            )
+
+    result[
+        "INVESTABLE"
+    ] = investable.astype(
+        bool
+    )
+
+    # =========================================================================
+    # MOTIVOS
+    # =========================================================================
+
+    def determine_reason(
+        row,
+    ) -> str:
+
+        if (
+            require_identity
+            and
+            not row[
+                "IDENTITY_VALID"
+            ]
+        ):
+            return "IDENTITY_INVALID"
+
+        if (
+            require_market
+            and
+            not row[
+                "MARKET_VALID"
+            ]
+        ):
+            return "MARKET_INVALID"
+
+        if (
+            require_fundamentals
+            and
+            not row[
+                "FUNDAMENTAL_COMPLETE"
+            ]
+        ):
+            return "FUNDAMENTAL_INCOMPLETE"
+
+        if (
+            require_pit
+            and
+            not row[
+                "FUNDAMENTAL_PIT_VALID"
+            ]
+        ):
+            return "PIT_INVALID"
+
+        if not row[
+            "FUNDAMENTAL_ELIGIBLE"
+        ]:
+            return "FUNDAMENTAL_MODEL_INELIGIBLE"
+
+        if (
+            EXCLUDE_FINANCIALS
+            and
+            row[
+                "IS_FINANCIAL"
+            ]
+        ):
+            return "FINANCIAL_EXCLUDED_FROM_STANDARD_MODEL"
+
+        return "OK"
+
+    result[
+        "INVESTABILITY_REASON"
+    ] = result.apply(
+        determine_reason,
+        axis=1,
+    )
+
+    result[
+        "INVESTABILITY_STATUS"
+    ] = np.where(
+        result[
+            "INVESTABLE"
+        ],
+        "PASS",
+        "FAIL",
+    )
+
+    # =========================================================================
+    # METADADOS
+    # =========================================================================
+
+    result[
+        "FORMATION_DATE_INVESTABILITY"
+    ] = context.formation_date
+
+    result[
+        "ACCOUNTING_CUTOFF_INVESTABILITY"
+    ] = context.accounting_cutoff
+
+    result[
+        "MARKET_CUTOFF_INVESTABILITY"
+    ] = context.market_cutoff
+
+    result[
+        "FUTURE_RETURN_USED"
+    ] = False
+
+    # =========================================================================
+    # FAIL-SAFE FINAL
+    # =========================================================================
+
+    if (
+        result[
+            "ISSUER_ID"
+        ]
+        .duplicated()
+        .any()
+    ):
+        raise InvestabilityIntegrityError(
+            "FAIL-SAFE: emissor duplicado "
+            "após Investability Gate."
+        )
+
+    assert_no_future_information(
+        result
+    )
+
+    return result
+
+
+# =============================================================================
+# ALIAS OPERACIONAL
+# =============================================================================
+
+def run_investability_engine(
+    issuer_universe: pd.DataFrame,
+    security_universe: pd.DataFrame,
+    fundamentals: pd.DataFrame,
+    context: PITContext,
+    required_fundamentals: Iterable[str] = DEFAULT_REQUIRED_FUNDAMENTALS,
+) -> pd.DataFrame:
+
+    return run_investability_gate(
+        issuer_universe=issuer_universe,
+        security_universe=security_universe,
+        fundamentals=fundamentals,
+        context=context,
+        required_fundamentals=required_fundamentals,
+    )
 
 
 # =============================================================================
@@ -1099,46 +912,31 @@ def audit_investability(
     result: pd.DataFrame,
 ) -> dict:
 
-    required = {
-        "ISSUER_ID",
-        "INVESTABLE",
-        "INVESTABILITY_STATUS",
-        "INVESTABILITY_REASON",
-        "IDENTITY_OK",
-        "MARKET_DATA_OK",
-        "FUNDAMENTAL_COMPLETE",
-        "PIT_OK",
-        "FINANCIAL_MODEL_OK",
-    }
-
-    _require_columns(
+    _require_dataframe(
         result,
-        required,
         "investability_result",
     )
 
-    total = int(
-        len(result)
+    _require_columns(
+        result,
+        (
+            "INVESTABLE",
+            "INVESTABILITY_REASON",
+        ),
+        "investability_result",
     )
 
-    passed = int(
+    investable = (
         result[
             "INVESTABLE"
         ]
-        .sum()
-    )
-
-    failed = (
-        total
-        - passed
+        .fillna(False)
+        .astype(bool)
     )
 
     reasons = (
-        result.loc[
-            ~result[
-                "INVESTABLE"
-            ],
-            "INVESTABILITY_REASON",
+        result[
+            "INVESTABILITY_REASON"
         ]
         .value_counts(
             dropna=False
@@ -1146,49 +944,49 @@ def audit_investability(
         .to_dict()
     )
 
-    coverage = {}
-
-    if (
-        "FUNDAMENTAL_COVERAGE"
-        in result.columns
-    ):
-
-        coverage = {
-            "mean":
-                float(
-                    result[
-                        "FUNDAMENTAL_COVERAGE"
-                    ]
-                    .mean()
-                ),
-
-            "median":
-                float(
-                    result[
-                        "FUNDAMENTAL_COVERAGE"
-                    ]
-                    .median()
-                ),
-        }
-
     return {
-        "status": "OK",
-        "issuers_total": total,
-        "issuers_passed": passed,
-        "issuers_failed": failed,
-        "pass_rate": (
-            passed / total
-            if total
-            else 0.0
-        ),
-        "failure_reasons": reasons,
-        "fundamental_coverage": coverage,
-        "future_return_used": False,
+        "status":
+            "OK",
+
+        "issuers_total":
+            int(
+                len(
+                    result
+                )
+            ),
+
+        "investable":
+            int(
+                investable.sum()
+            ),
+
+        "rejected":
+            int(
+                (
+                    ~investable
+                ).sum()
+            ),
+
+        "investable_rate":
+            float(
+                investable.mean()
+            ),
+
+        "reasons": {
+            str(key):
+                int(value)
+
+            for key, value
+            in reasons.items()
+        },
+
+        "future_return_used":
+            False,
     }
 
 
 # =============================================================================
-# SALVAR RESULTADOS
+# SALVAR
 # =============================================================================
 
 def save_investability(
@@ -1208,19 +1006,9 @@ def save_investability(
         )
     )
 
-    full_path = (
+    csv_path = (
         INVESTABILITY_DIR
         / f"investability_{date_tag}.csv"
-    )
-
-    passed_path = (
-        INVESTABILITY_DIR
-        / f"investable_issuers_{date_tag}.csv"
-    )
-
-    rejected_path = (
-        INVESTABILITY_DIR
-        / f"investability_rejected_{date_tag}.csv"
     )
 
     manifest_path = (
@@ -1229,27 +1017,7 @@ def save_investability(
     )
 
     result.to_csv(
-        full_path,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    result.loc[
-        result[
-            "INVESTABLE"
-        ]
-    ].to_csv(
-        passed_path,
-        index=False,
-        encoding="utf-8-sig",
-    )
-
-    result.loc[
-        ~result[
-            "INVESTABLE"
-        ]
-    ].to_csv(
-        rejected_path,
+        csv_path,
         index=False,
         encoding="utf-8-sig",
     )
@@ -1285,19 +1053,9 @@ def save_investability(
         **audit,
 
         "files": {
-            "full":
+            "csv":
                 str(
-                    full_path
-                ),
-
-            "passed":
-                str(
-                    passed_path
-                ),
-
-            "rejected":
-                str(
-                    rejected_path
+                    csv_path
                 ),
         },
     }
@@ -1315,14 +1073,8 @@ def save_investability(
         )
 
     return {
-        "full":
-            full_path,
-
-        "passed":
-            passed_path,
-
-        "rejected":
-            rejected_path,
+        "csv":
+            csv_path,
 
         "manifest":
             manifest_path,
@@ -1334,108 +1086,6 @@ def save_investability(
 # =============================================================================
 
 def _self_test():
-
-    issuer_universe = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-            ],
-
-            "TICKERS": [
-                "AAAA3",
-                "BBBB3",
-                "CCCC3",
-            ],
-
-            "N_SECURITIES": [
-                1,
-                1,
-                1,
-            ],
-
-            "IS_FINANCIAL": [
-                False,
-                False,
-                True,
-            ],
-
-            "FUNDAMENTAL_ELIGIBLE": [
-                True,
-                True,
-                False,
-            ],
-        }
-    )
-
-    security_universe = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-            ],
-
-            "TICKER": [
-                "AAAA3",
-                "BBBB3",
-                "CCCC3",
-            ],
-
-            "FORMATION_PRICE": [
-                10.0,
-                20.0,
-                30.0,
-            ],
-
-            "FORMATION_PRICE_DATE": [
-                "2025-12-30",
-                "2025-12-30",
-                "2025-12-30",
-            ],
-
-            "IDENTITY_RESOLVED": [
-                True,
-                True,
-                True,
-            ],
-        }
-    )
-
-    fundamentals = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-            ],
-
-            "ATIVO_TOTAL": [
-                1000.0,
-                2000.0,
-                3000.0,
-            ],
-
-            "PL": [
-                500.0,
-                None,
-                1500.0,
-            ],
-
-            "RECEITA": [
-                800.0,
-                1000.0,
-                2000.0,
-            ],
-
-            "ACCOUNTING_CUTOFF": [
-                "2025-09-30",
-                "2025-09-30",
-                "2025-09-30",
-            ],
-        }
-    )
 
     class FakeContext:
 
@@ -1451,70 +1101,137 @@ def _self_test():
             "2025-12-30"
         )
 
+    issuers = pd.DataFrame(
+        {
+            "ISSUER_ID": [
+                "1",
+                "2",
+            ],
+
+            "TICKERS": [
+                "AAAA3",
+                "BBBB3",
+            ],
+
+            "N_SECURITIES": [
+                1,
+                1,
+            ],
+
+            "IS_FINANCIAL": [
+                False,
+                False,
+            ],
+
+            "FUNDAMENTAL_ELIGIBLE": [
+                True,
+                True,
+            ],
+        }
+    )
+
+    securities = pd.DataFrame(
+        {
+            "ISSUER_ID": [
+                "1",
+                "2",
+            ],
+
+            "TICKER": [
+                "AAAA3",
+                "BBBB3",
+            ],
+
+            "FORMATION_PRICE": [
+                10.0,
+                20.0,
+            ],
+
+            "FORMATION_PRICE_DATE": [
+                "2025-12-30",
+                "2025-12-30",
+            ],
+
+            "IDENTITY_RESOLVED": [
+                True,
+                True,
+            ],
+        }
+    )
+
+    fundamentals = pd.DataFrame(
+        {
+            "ISSUER_ID": [
+                "1",
+                "2",
+            ],
+
+            "ATIVO_TOTAL": [
+                1000.0,
+                2000.0,
+            ],
+
+            "PL": [
+                500.0,
+                np.nan,
+            ],
+
+            "RECEITA": [
+                800.0,
+                1500.0,
+            ],
+
+            "ACCOUNTING_CUTOFF": [
+                "2025-09-30",
+                "2025-09-30",
+            ],
+        }
+    )
+
     result = run_investability_gate(
-        issuer_universe=issuer_universe,
-        security_universe=security_universe,
+        issuer_universe=issuers,
+        security_universe=securities,
         fundamentals=fundamentals,
         context=FakeContext(),
     )
 
-    company_1 = (
-        result.loc[
-            result[
-                "ISSUER_ID"
-            ]
-            == "1"
-        ]
-        .iloc[0]
-    )
-
-    company_2 = (
-        result.loc[
-            result[
-                "ISSUER_ID"
-            ]
-            == "2"
-        ]
-        .iloc[0]
-    )
-
-    company_3 = (
-        result.loc[
-            result[
-                "ISSUER_ID"
-            ]
-            == "3"
-        ]
-        .iloc[0]
+    indexed = (
+        result
+        .set_index(
+            "ISSUER_ID"
+        )
     )
 
     if not bool(
-        company_1[
-            "INVESTABLE"
+        indexed.loc[
+            "1",
+            "INVESTABLE",
         ]
     ):
         raise InvestabilityError(
-            "SELF-TEST: empresa 1 deveria passar."
+            "SELF-TEST: emissor 1 deveria passar."
         )
 
     if bool(
-        company_2[
-            "INVESTABLE"
+        indexed.loc[
+            "2",
+            "INVESTABLE",
         ]
     ):
         raise InvestabilityError(
-            "SELF-TEST: empresa 2 deveria falhar "
-            "por fundamentos incompletos."
+            "SELF-TEST: emissor 2 deveria falhar."
         )
 
-    if bool(
-        company_3[
-            "INVESTABLE"
+    if (
+        indexed.loc[
+            "2",
+            "INVESTABILITY_REASON",
         ]
+        !=
+        "FUNDAMENTAL_INCOMPLETE"
     ):
         raise InvestabilityError(
-            "SELF-TEST: instituição financeira "
-            "não deveria entrar no modelo padrão."
+            "SELF-TEST: motivo incorreto."
         )
 
     return True
@@ -1533,13 +1250,10 @@ if __name__ == "__main__":
     _self_test()
 
     print("Self-test: OK")
-    print("Modelo: GATE")
+    print("Cobertura fundamental: OK")
+    print("PIT: VALIDADO")
     print("Identidade: VALIDADA")
     print("Mercado: VALIDADO")
-    print("Fundamentos mínimos: VALIDADOS")
-    print("PIT: OBRIGATÓRIO")
-    print("Financeiras: MODELO SEPARADO")
+    print("Financeiras: CONTROLADAS")
     print("Retorno futuro: NÃO UTILIZADO")
-    print("Score de oportunidade: NÃO CALCULADO")
-
     print("=" * 72)
