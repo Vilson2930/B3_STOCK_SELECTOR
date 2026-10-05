@@ -736,16 +736,24 @@ def build_identity_map(
             "CODIGO_CVM",
             "CD_CVM",
         ),
+        required=False,
     )
 
     cnpj_col = _find_column(
         raw,
         (
             "CNPJ_COMPANHIA",
+            "CNPJ_CIA",
             "CNPJ",
         ),
         required=False,
     )
+
+    if cnpj_col is None and cvm_col is None:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: FCA sem identificador de emissor. "
+            "Esperado CNPJ_COMPANHIA/CNPJ_CIA/CNPJ ou CODIGO_CVM/CD_CVM."
+        )
 
     name_col = _find_column(
         raw,
@@ -763,18 +771,26 @@ def build_identity_map(
         .map(_ticker)
     )
 
-    result["ISSUER_ID"] = (
-        raw[cvm_col]
-        .map(_issuer_id)
-    )
-
     if cnpj_col is not None:
         result["CNPJ"] = (
             raw[cnpj_col]
             .map(_cnpj)
         )
+        result["ISSUER_ID"] = result["CNPJ"]
     else:
         result["CNPJ"] = None
+        result["ISSUER_ID"] = (
+            raw[cvm_col]
+            .map(_issuer_id)
+        )
+
+    if cvm_col is not None:
+        result["CD_CVM"] = (
+            raw[cvm_col]
+            .map(_issuer_id)
+        )
+    else:
+        result["CD_CVM"] = None
 
     if name_col is not None:
         result["ISSUER_NAME"] = (
@@ -865,13 +881,30 @@ def _prepare_statement(
 
     result = df.copy()
 
+    cnpj_col = _find_column(
+        result,
+        (
+            "CNPJ_CIA",
+            "CNPJ_COMPANHIA",
+            "CNPJ",
+        ),
+        required=False,
+    )
+
     cvm_col = _find_column(
         result,
         (
             "CD_CVM",
             "CODIGO_CVM",
         ),
+        required=False,
     )
+
+    if cnpj_col is None and cvm_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: demonstração CVM sem identificador de emissor. "
+            "Esperado CNPJ_CIA/CNPJ_COMPANHIA/CNPJ ou CD_CVM/CODIGO_CVM."
+        )
 
     account_col = _find_column(
         result,
@@ -933,10 +966,16 @@ def _prepare_statement(
         required=False,
     )
 
-    result["ISSUER_ID"] = (
-        result[cvm_col]
-        .map(_issuer_id)
-    )
+    if cnpj_col is not None:
+        result["ISSUER_ID"] = (
+            result[cnpj_col]
+            .map(_cnpj)
+        )
+    else:
+        result["ISSUER_ID"] = (
+            result[cvm_col]
+            .map(_issuer_id)
+        )
 
     result["CD_CONTA_CANONICAL"] = (
         result[account_col]
@@ -1941,6 +1980,10 @@ def _self_test() -> None:
 
     sample = pd.DataFrame(
         {
+            "CNPJ_CIA": [
+                "12.345.678/0001-90",
+                "12.345.678/0001-90",
+            ],
             "CD_CVM": [
                 "1234",
                 "1234",
