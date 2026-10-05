@@ -546,43 +546,76 @@ def run_market_stage(
     context: PITContext,
 ) -> pd.DataFrame:
 
-    function = resolve_callable(
+    # O Market Engine possui duas etapas explícitas:
+    # 1) carregar o histórico COTAHIST em DataFrame;
+    # 2) construir o universo usando esse DataFrame + contexto PIT.
+    #
+    # build_market_universe NÃO recebe uma lista de anos.
+
+    read_function = resolve_callable(
+        market_module,
+        (
+            "read_cotahist_years",
+        ),
+    )
+
+    build_function = resolve_callable(
         market_module,
         (
             "build_market_universe",
         ),
     )
 
-    years = list(
-        range(
-            context.market_cutoff.year,
-            context.market_cutoff.year + 1,
-        )
-    )
+    # Carrega somente informação que pode ser conhecida até o market_cutoff.
+    # O ano corrente é suficiente para a regra de sessões do projeto e evita
+    # baixar períodos desnecessários.
+    years = [
+        int(context.market_cutoff.year)
+    ]
 
-    result = call_stage(
-        "MARKET",
-        function,
+    history = call_stage(
+        "MARKET_READ",
+        read_function,
         [
             (
-                (),
-                {
-                    "context": context,
-                },
-            ),
-            (
-                (context,),
+                (years,),
                 {},
             ),
             (
                 (),
                 {
                     "years": years,
+                },
+            ),
+        ],
+    )
+
+    require_dataframe(
+        history,
+        "MARKET_HISTORY",
+    )
+
+    assert_no_future_information(
+        history,
+        "MARKET_HISTORY",
+    )
+
+    result = call_stage(
+        "MARKET",
+        build_function,
+        [
+            (
+                (),
+                {
+                    "df": history,
                     "context": context,
                 },
             ),
             (
-                (years, context),
+                (
+                    history,
+                    context,
+                ),
                 {},
             ),
         ],
@@ -597,6 +630,37 @@ def run_market_stage(
         result,
         "MARKET",
     )
+
+    # Salva a camada de mercado quando o módulo oferece a função oficial.
+    save_function = resolve_callable(
+        market_module,
+        (
+            "save_market_universe",
+        ),
+        required=False,
+    )
+
+    if save_function is not None:
+        call_stage(
+            "MARKET_SAVE",
+            save_function,
+            [
+                (
+                    (
+                        result,
+                        context,
+                    ),
+                    {},
+                ),
+                (
+                    (),
+                    {
+                        "universe": result,
+                        "context": context,
+                    },
+                ),
+            ],
+        )
 
     return result
 
