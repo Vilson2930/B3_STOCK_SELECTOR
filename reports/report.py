@@ -1865,7 +1865,7 @@ def _self_test():
     )
 
     if (
-        "B3 STOCK SELECTOR"
+        str(PROJECT_NAME)
         not in html
     ):
 
