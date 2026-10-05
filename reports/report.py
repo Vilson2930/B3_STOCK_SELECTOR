@@ -52,16 +52,28 @@ import pandas as pd
 # =============================================================================
 
 try:
-    from config import (
-        OUTPUT_DIR,
-        PROJECT_NAME,
-        VERSION,
-    )
-
+    import config as project_config
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar config.py."
     ) from exc
+
+if not hasattr(project_config, "OUTPUT_DIR"):
+    raise RuntimeError(
+        "FAIL-SAFE: OUTPUT_DIR ausente em config.py."
+    )
+
+OUTPUT_DIR = project_config.OUTPUT_DIR
+PROJECT_NAME = getattr(
+    project_config,
+    "PROJECT_NAME",
+    getattr(project_config, "PROJECT", "B3_STOCK_SELECTOR"),
+)
+VERSION = getattr(
+    project_config,
+    "VERSION",
+    getattr(project_config, "PROJECT_VERSION", "0.1.0"),
+)
 
 
 try:
@@ -120,6 +132,7 @@ ALLOWED_METADATA = {
     "FUTURE_RETURN_USED_VALUATION",
     "FUTURE_RETURN_USED_RANKING",
     "FUTURE_RETURN_USED_RISK",
+    "FUTURE_RETURN_USED_REPORT",
 }
 
 
