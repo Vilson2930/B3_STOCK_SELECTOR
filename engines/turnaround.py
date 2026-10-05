@@ -41,14 +41,6 @@
 # CONSEQUÊNCIA:
 # Este engine NÃO está autorizado a gerar compra.
 #
-# Ele apenas:
-# - mede posição relativa;
-# - identifica zona de margem deprimida;
-# - mede contexto econômico;
-# - registra possíveis sinais;
-# - exige proteção financeira;
-# - prepara dados para validação futura.
-#
 # PRODUÇÃO:
 # TURNAROUND_ENGINE["production_authorized"] deve permanecer False
 # até existir validação temporal independente suficiente.
@@ -69,39 +61,22 @@ import pandas as pd
 # =============================================================================
 
 try:
-    from config import (
-        OUTPUT_DIR,
-        TURNAROUND_ENGINE,
-    )
-
+    from config import OUTPUT_DIR, TURNAROUND_ENGINE
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar config.py."
     ) from exc
 
-
 try:
     from data.pit import PITContext
-
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar PITContext."
     ) from exc
 
 
-# =============================================================================
-# DIRETÓRIO
-# =============================================================================
-
-TURNAROUND_DIR = (
-    OUTPUT_DIR
-    / "turnaround"
-)
-
-TURNAROUND_DIR.mkdir(
-    parents=True,
-    exist_ok=True,
-)
+TURNAROUND_DIR = OUTPUT_DIR / "turnaround"
+TURNAROUND_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =============================================================================
@@ -121,27 +96,20 @@ class TurnaroundProductionError(TurnaroundError):
 
 
 # =============================================================================
-# FATORES CANDIDATOS
-#
-# Estes fatores são derivados do estudo científico.
-#
-# NÃO representam regra final.
+# FATORES DE PESQUISA
 # =============================================================================
 
 RESEARCH_FACTORS = {
-
     "MARGEM_BRUTA": {
         "direction": "LOW",
         "role": "PRIMARY",
         "status": "CANDIDATE",
     },
-
     "MARGEM_LIQUIDA": {
         "direction": "LOW",
         "role": "SECONDARY",
         "status": "RECURRENT_SIGNAL",
     },
-
     "ROE": {
         "direction": "LOW",
         "role": "CONTEXT",
@@ -150,27 +118,12 @@ RESEARCH_FACTORS = {
 }
 
 
-# =============================================================================
-# FATORES QUE NÃO PODEM SER REINTRODUZIDOS COMO SINAL ESTRUTURAL
-# =============================================================================
-
 BLOCKED_RESEARCH_FACTORS = (
     "ESTOQUES",
     "DIVIDA_BRUTA_ATIVO_AS_OPPORTUNITY",
     "INTANGIVEL_ATIVO_AS_OPPORTUNITY",
 )
 
-
-# =============================================================================
-# PROTEÇÕES
-#
-# Não são sinais de oportunidade.
-#
-# Servem para reduzir o risco de interpretar empresa estruturalmente
-# deteriorada como turnaround.
-#
-# Neste estágio utilizamos principalmente flags econômicos objetivos.
-# =============================================================================
 
 SAFETY_FLAGS = (
     "PL_POSITIVO",
@@ -182,10 +135,7 @@ SAFETY_FLAGS = (
 # =============================================================================
 
 def _utc_now_iso() -> str:
-
-    return datetime.now(
-        timezone.utc
-    ).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _require_dataframe(
@@ -193,17 +143,12 @@ def _require_dataframe(
     name: str,
 ) -> None:
 
-    if not isinstance(
-        df,
-        pd.DataFrame,
-    ):
-
+    if not isinstance(df, pd.DataFrame):
         raise TurnaroundIntegrityError(
             f"{name} não é DataFrame."
         )
 
     if df.empty:
-
         raise TurnaroundIntegrityError(
             f"FAIL-SAFE: {name} está vazio."
         )
@@ -215,18 +160,11 @@ def _require_columns(
     name: str,
 ) -> None:
 
-    _require_dataframe(
-        df,
-        name,
-    )
+    _require_dataframe(df, name)
 
-    missing = (
-        set(columns)
-        - set(df.columns)
-    )
+    missing = set(columns) - set(df.columns)
 
     if missing:
-
         raise TurnaroundIntegrityError(
             f"FAIL-SAFE: {name} sem colunas obrigatórias: "
             f"{sorted(missing)}"
@@ -249,32 +187,55 @@ def assert_no_future_return(
         "FUTURE_WINNER",
     )
 
+    # Colunas exclusivamente de auditoria.
+    # Elas podem existir somente se não indicarem uso de retorno futuro.
+    allowed_audit_columns = {
+        "FUTURE_RETURN_USED",
+        "FUTURE_RETURN_USED_QUALITY",
+        "FUTURE_RETURN_USED_TURNAROUND",
+    }
+
     forbidden = []
 
     for column in df.columns:
 
-        normalized = (
-            str(column)
-            .upper()
-        )
+        normalized = str(column).upper()
 
-        if normalized in {
-            "FUTURE_RETURN_USED",
-            "FUTURE_RETURN_USED_QUALITY",
-        }:
+        if normalized in allowed_audit_columns:
+
+            values = df[column].dropna()
+
+            if not values.empty:
+
+                normalized_values = (
+                    values
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                invalid = ~normalized_values.isin(
+                    {
+                        "FALSE",
+                        "0",
+                    }
+                )
+
+                if invalid.any():
+                    raise TurnaroundIntegrityError(
+                        "FAIL-SAFE: coluna de auditoria "
+                        f"{column} indica possível uso de retorno futuro."
+                    )
+
             continue
 
         if any(
             term in normalized
             for term in forbidden_terms
         ):
-
-            forbidden.append(
-                column
-            )
+            forbidden.append(column)
 
     if forbidden:
-
         raise TurnaroundIntegrityError(
             "FAIL-SAFE: retorno futuro ou label "
             "detectado no Turnaround Engine: "
@@ -304,56 +265,30 @@ def prepare_turnaround_base(
         "fundamentals",
     )
 
-    assert_no_future_return(
-        fundamentals
-    )
+    assert_no_future_return(fundamentals)
 
-    result = (
-        fundamentals
-        .copy()
-    )
-
-    # -------------------------------------------------------------------------
-    # SOMENTE EMPRESAS QUE PASSARAM PELO INVESTABILITY GATE
-    # -------------------------------------------------------------------------
+    result = fundamentals.copy()
 
     if "INVESTABLE" in result.columns:
-
         result = result.loc[
-            result[
-                "INVESTABLE"
-            ]
+            result["INVESTABLE"]
             .fillna(False)
             .astype(bool)
         ].copy()
 
-    # -------------------------------------------------------------------------
-    # FUNDAMENTAL ENGINE DEVE ESTAR VÁLIDO
-    # -------------------------------------------------------------------------
-
     result = result.loc[
-        result[
-            "FUNDAMENTAL_ENGINE_OK"
-        ]
+        result["FUNDAMENTAL_ENGINE_OK"]
         .fillna(False)
         .astype(bool)
     ].copy()
 
     if result.empty:
-
         raise TurnaroundIntegrityError(
             "FAIL-SAFE: nenhuma empresa elegível "
             "para Turnaround."
         )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
-
+    if result["ISSUER_ID"].duplicated().any():
         raise TurnaroundIntegrityError(
             "FAIL-SAFE: ISSUER_ID duplicado."
         )
@@ -368,15 +303,6 @@ def prepare_turnaround_base(
 def percentile_position(
     series: pd.Series,
 ) -> pd.Series:
-    """
-    Retorna posição percentual crescente.
-
-    Quanto menor o valor econômico,
-    menor o percentil.
-
-    Exemplo:
-        margem bruta muito baixa -> percentil próximo de 0.
-    """
 
     numeric = pd.to_numeric(
         series,
@@ -389,19 +315,13 @@ def percentile_position(
         dtype=float,
     )
 
-    valid = (
-        numeric.notna()
-    )
+    valid = numeric.notna()
 
     if valid.sum() == 0:
         return result
 
-    result.loc[
-        valid
-    ] = (
-        numeric.loc[
-            valid
-        ]
+    result.loc[valid] = (
+        numeric.loc[valid]
         .rank(
             pct=True,
             method="average",
@@ -422,59 +342,31 @@ def calculate_research_positions(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     for factor in RESEARCH_FACTORS:
 
         result[
             f"{factor}_PERCENTILE"
         ] = percentile_position(
-            result[
-                factor
-            ]
+            result[factor]
         )
 
     return result
 
 
 # =============================================================================
-# MARGEM BRUTA — SINAL PRINCIPAL CANDIDATO
+# MARGEM BRUTA
 # =============================================================================
 
 def classify_gross_margin_zone(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Classifica a empresa pela posição relativa da margem bruta.
 
-    IMPORTANTE:
-    São zonas descritivas.
-
-    NÃO são thresholds de compra.
-
-    Os cortes representam divisões naturais da distribuição:
-        <=20%
-        20-40%
-        40-60%
-        60-80%
-        >80%
-
-    Isso preserva a lógica do estudo por quintis sem afirmar
-    que o primeiro quintil seja uma regra final.
-    """
-
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     percentile = pd.to_numeric(
-        result[
-            "MARGEM_BRUTA_PERCENTILE"
-        ],
+        result["MARGEM_BRUTA_PERCENTILE"],
         errors="coerce",
     )
 
@@ -490,20 +382,17 @@ def classify_gross_margin_zone(
 
     zone.loc[
         percentile.gt(0.20)
-        &
-        percentile.le(0.40)
+        & percentile.le(0.40)
     ] = "LOW"
 
     zone.loc[
         percentile.gt(0.40)
-        &
-        percentile.le(0.60)
+        & percentile.le(0.60)
     ] = "MID"
 
     zone.loc[
         percentile.gt(0.60)
-        &
-        percentile.le(0.80)
+        & percentile.le(0.80)
     ] = "HIGH"
 
     zone.loc[
@@ -517,70 +406,38 @@ def classify_gross_margin_zone(
     return result
 
 
-# =============================================================================
-# INTENSIDADE DO SINAL DE MARGEM BRUTA
-# =============================================================================
-
 def calculate_gross_margin_research_signal(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Transforma posição de margem bruta em intensidade [0,1].
 
-    Quanto menor a margem bruta relativa,
-    maior o sinal de PESQUISA.
-
-    Isso NÃO é probabilidade calibrada.
-    Isso NÃO é score de compra.
-    """
-
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     percentile = pd.to_numeric(
-        result[
-            "MARGEM_BRUTA_PERCENTILE"
-        ],
+        result["MARGEM_BRUTA_PERCENTILE"],
         errors="coerce",
     )
 
     result[
         "GROSS_MARGIN_RESEARCH_SIGNAL"
     ] = (
-        1.0
-        -
-        percentile
-    )
-
-    result[
-        "GROSS_MARGIN_RESEARCH_SIGNAL"
-    ] = (
-        result[
-            "GROSS_MARGIN_RESEARCH_SIGNAL"
-        ]
-        .clip(
-            lower=0.0,
-            upper=1.0,
-        )
+        1.0 - percentile
+    ).clip(
+        lower=0.0,
+        upper=1.0,
     )
 
     return result
 
 
 # =============================================================================
-# SINAIS SECUNDÁRIOS
+# CONTEXTO SECUNDÁRIO
 # =============================================================================
 
 def calculate_secondary_context(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     for factor in (
         "MARGEM_LIQUIDA",
@@ -621,67 +478,37 @@ def calculate_secondary_context(
 def calculate_safety_context(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Camada conservadora.
 
-    Não atribui pontos de oportunidade.
-    Apenas registra se existem condições mínimas observáveis.
-
-    Neste estágio:
-        patrimônio líquido positivo.
-
-    Investability já deve ter sido aplicado anteriormente.
-    """
-
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     if "PL_POSITIVO" in result.columns:
-
-        pl_positive = (
+        result[
+            "TURNAROUND_PL_POSITIVE"
+        ] = (
             result[
                 "PL_POSITIVO"
             ]
             .astype("boolean")
         )
-
     else:
-
-        pl_positive = pd.Series(
+        result[
+            "TURNAROUND_PL_POSITIVE"
+        ] = pd.Series(
             pd.NA,
             index=result.index,
             dtype="boolean",
         )
 
-    result[
-        "TURNAROUND_PL_POSITIVE"
-    ] = pl_positive
-
-    # -------------------------------------------------------------------------
-    # CAIXA OPERACIONAL
-    #
-    # Não exigimos FCO positivo como regra definitiva,
-    # porque empresas em recuperação podem ainda apresentar FCO negativo.
-    # Apenas registramos o contexto.
-    # -------------------------------------------------------------------------
-
     if "FCO_POSITIVO" in result.columns:
-
         result[
             "TURNAROUND_FCO_POSITIVE"
         ] = (
             result[
                 "FCO_POSITIVO"
             ]
-            .astype(
-                "boolean"
-            )
+            .astype("boolean")
         )
-
     else:
-
         result[
             "TURNAROUND_FCO_POSITIVE"
         ] = pd.Series(
@@ -690,25 +517,16 @@ def calculate_safety_context(
             dtype="boolean",
         )
 
-    # -------------------------------------------------------------------------
-    # EBIT
-    # -------------------------------------------------------------------------
-
     if "EBIT_POSITIVO" in result.columns:
-
         result[
             "TURNAROUND_EBIT_POSITIVE"
         ] = (
             result[
                 "EBIT_POSITIVO"
             ]
-            .astype(
-                "boolean"
-            )
+            .astype("boolean")
         )
-
     else:
-
         result[
             "TURNAROUND_EBIT_POSITIVE"
         ] = pd.Series(
@@ -727,33 +545,11 @@ def calculate_safety_context(
 def classify_research_candidate(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Classificação exploratória.
 
-    CANDIDATE:
-        margem bruta na metade inferior da distribuição.
-
-    HIGH_INTEREST:
-        margem bruta no quintil inferior.
-
-    Isso serve para auditoria e pesquisa.
-
-    NÃO significa:
-        BUY
-        ENTRY
-        STRONG_ENTRY
-        recomendação
-    """
-
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     percentile = pd.to_numeric(
-        result[
-            "MARGEM_BRUTA_PERCENTILE"
-        ],
+        result["MARGEM_BRUTA_PERCENTILE"],
         errors="coerce",
     )
 
@@ -789,35 +585,16 @@ def classify_research_candidate(
 def calculate_experimental_score(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """
-    Score exclusivamente descritivo.
 
-    IMPORTANTE:
-    Não combina os três fatores em um modelo preditivo.
+    result = df.copy()
 
-    Isso é intencional.
-
-    O estudo mostrou que a combinação dos sinais não teve significância
-    global suficiente para virar regra.
-
-    Portanto o score experimental principal permanece baseado apenas
-    na posição relativa da MARGEM_BRUTA.
-
-    Margem líquida e ROE ficam como contexto separado.
-    """
-
-    result = (
-        df
-        .copy()
-    )
-
+    # Intencionalmente utiliza somente a posição da margem bruta.
+    # Margem líquida e ROE permanecem contexto.
     result[
         "TURNAROUND_RESEARCH_SCORE"
-    ] = (
-        result[
-            "GROSS_MARGIN_RESEARCH_SIGNAL"
-        ]
-    )
+    ] = result[
+        "GROSS_MARGIN_RESEARCH_SIGNAL"
+    ]
 
     result[
         "TURNAROUND_RESEARCH_SCORE_VALID"
@@ -832,13 +609,10 @@ def calculate_experimental_score(
 
 
 # =============================================================================
-# PRODUÇÃO
+# BLOQUEIO DE PRODUÇÃO
 # =============================================================================
 
 def enforce_production_lock() -> None:
-    """
-    Impede que o motor seja promovido silenciosamente para produção.
-    """
 
     production_authorized = bool(
         TURNAROUND_ENGINE.get(
@@ -857,7 +631,6 @@ def enforce_production_lock() -> None:
         production_authorized
         and validated_rule is None
     ):
-
         raise TurnaroundProductionError(
             "FAIL-SAFE: Turnaround marcado como produção "
             "sem regra temporalmente validada."
@@ -877,7 +650,6 @@ def run_turnaround_engine(
         "enabled",
         True,
     ):
-
         raise TurnaroundError(
             "Turnaround Engine está desativado."
         )
@@ -918,10 +690,6 @@ def run_turnaround_engine(
         result
     )
 
-    # -------------------------------------------------------------------------
-    # STATUS DE PRODUÇÃO
-    # -------------------------------------------------------------------------
-
     production_authorized = bool(
         TURNAROUND_ENGINE.get(
             "production_authorized",
@@ -932,13 +700,6 @@ def run_turnaround_engine(
     result[
         "TURNAROUND_PRODUCTION_AUTHORIZED"
     ] = production_authorized
-
-    # -------------------------------------------------------------------------
-    # DECISÃO OPERACIONAL
-    #
-    # Enquanto não houver validação suficiente:
-    # NENHUMA empresa recebe sinal operacional.
-    # -------------------------------------------------------------------------
 
     if not production_authorized:
 
@@ -955,26 +716,18 @@ def run_turnaround_engine(
         )
 
         if validated_rule is None:
-
             raise TurnaroundProductionError(
                 "FAIL-SAFE: regra validada ausente."
             )
 
-        # A execução de uma futura regra de produção deve ser
-        # implementada explicitamente quando a validação científica
-        # estiver concluída.
         raise TurnaroundProductionError(
             "FAIL-SAFE: execução de produção ainda "
             "não implementada. Pesquisa preservada."
         )
 
-    # -------------------------------------------------------------------------
-    # METADADOS
-    # -------------------------------------------------------------------------
-
     result[
         "TURNAROUND_ENGINE_VERSION"
-    ] = "0.1.0"
+    ] = "0.1.1"
 
     result[
         "TURNAROUND_ENGINE_STATUS"
@@ -994,12 +747,6 @@ def run_turnaround_engine(
     result[
         "FUTURE_RETURN_USED_TURNAROUND"
     ] = False
-
-    # -------------------------------------------------------------------------
-    # RANK DE PESQUISA
-    #
-    # Não é ranking de compra.
-    # -------------------------------------------------------------------------
 
     result[
         "TURNAROUND_RESEARCH_RANK"
@@ -1073,44 +820,21 @@ def audit_turnaround(
     )
 
     return {
-        "status":
-            "OK",
-
-        "mode":
-            "RESEARCH_ONLY",
-
-        "issuers":
-            int(
-                len(
-                    result
-                )
-            ),
-
-        "primary_factor":
-            "MARGEM_BRUTA",
-
-        "primary_direction":
-            "LOW",
-
-        "research_status_distribution":
-            status_counts,
-
-        "gross_margin_zone_distribution":
-            zone_counts,
-
-        "production_authorized":
-            bool(
-                TURNAROUND_ENGINE.get(
-                    "production_authorized",
-                    False,
-                )
-            ),
-
-        "future_return_used":
-            False,
-
-        "buy_signal_generated":
-            False,
+        "status": "OK",
+        "mode": "RESEARCH_ONLY",
+        "issuers": int(len(result)),
+        "primary_factor": "MARGEM_BRUTA",
+        "primary_direction": "LOW",
+        "research_status_distribution": status_counts,
+        "gross_margin_zone_distribution": zone_counts,
+        "production_authorized": bool(
+            TURNAROUND_ENGINE.get(
+                "production_authorized",
+                False,
+            )
+        ),
+        "future_return_used": False,
+        "buy_signal_generated": False,
     }
 
 
@@ -1130,9 +854,7 @@ def save_turnaround(
     date_tag = (
         context
         .formation_date
-        .strftime(
-            "%Y%m%d"
-        )
+        .strftime("%Y%m%d")
     )
 
     result_path = (
@@ -1152,41 +874,27 @@ def save_turnaround(
     )
 
     manifest = {
-        "engine":
-            "TURNAROUND_ENGINE",
-
-        "created_at_utc":
-            _utc_now_iso(),
-
-        "formation_date":
-            str(
-                context
-                .formation_date
-                .date()
-            ),
-
-        "accounting_cutoff":
-            str(
-                context
-                .accounting_cutoff
-                .date()
-            ),
-
-        "research_factors":
-            RESEARCH_FACTORS,
-
-        "blocked_research_factors":
-            list(
-                BLOCKED_RESEARCH_FACTORS
-            ),
-
+        "engine": "TURNAROUND_ENGINE",
+        "created_at_utc": _utc_now_iso(),
+        "formation_date": str(
+            context
+            .formation_date
+            .date()
+        ),
+        "accounting_cutoff": str(
+            context
+            .accounting_cutoff
+            .date()
+        ),
+        "research_factors": RESEARCH_FACTORS,
+        "blocked_research_factors": list(
+            BLOCKED_RESEARCH_FACTORS
+        ),
         **audit,
-
         "files": {
-            "turnaround_research":
-                str(
-                    result_path
-                ),
+            "turnaround_research": str(
+                result_path
+            ),
         },
     }
 
@@ -1203,11 +911,8 @@ def save_turnaround(
         )
 
     return {
-        "turnaround":
-            result_path,
-
-        "manifest":
-            manifest_path,
+        "turnaround": result_path,
+        "manifest": manifest_path,
     }
 
 
@@ -1226,7 +931,6 @@ def _self_test():
                 "4",
                 "5",
             ],
-
             "FUNDAMENTAL_ENGINE_OK": [
                 True,
                 True,
@@ -1234,7 +938,6 @@ def _self_test():
                 True,
                 True,
             ],
-
             "INVESTABLE": [
                 True,
                 True,
@@ -1242,7 +945,6 @@ def _self_test():
                 True,
                 True,
             ],
-
             "MARGEM_BRUTA": [
                 0.05,
                 0.15,
@@ -1250,7 +952,6 @@ def _self_test():
                 0.50,
                 0.80,
             ],
-
             "MARGEM_LIQUIDA": [
                 -0.10,
                 -0.02,
@@ -1258,7 +959,6 @@ def _self_test():
                 0.10,
                 0.20,
             ],
-
             "ROE": [
                 -0.10,
                 0.01,
@@ -1266,7 +966,6 @@ def _self_test():
                 0.15,
                 0.25,
             ],
-
             "PL_POSITIVO": [
                 True,
                 True,
@@ -1274,7 +973,6 @@ def _self_test():
                 True,
                 True,
             ],
-
             "FCO_POSITIVO": [
                 False,
                 True,
@@ -1282,7 +980,6 @@ def _self_test():
                 True,
                 True,
             ],
-
             "EBIT_POSITIVO": [
                 False,
                 True,
@@ -1294,11 +991,9 @@ def _self_test():
     )
 
     class FakeContext:
-
         formation_date = pd.Timestamp(
             "2025-12-31"
         )
-
         accounting_cutoff = pd.Timestamp(
             "2025-09-30"
         )
@@ -1308,14 +1003,10 @@ def _self_test():
         FakeContext(),
     )
 
-    indexed = (
-        result
-        .set_index(
-            "ISSUER_ID"
-        )
+    indexed = result.set_index(
+        "ISSUER_ID"
     )
 
-    # Empresa com menor margem deve ter maior sinal de pesquisa.
     if not (
         indexed.loc[
             "1",
@@ -1327,12 +1018,10 @@ def _self_test():
             "TURNAROUND_RESEARCH_SCORE",
         ]
     ):
-
         raise TurnaroundError(
             "SELF-TEST: direção da margem bruta incorreta."
         )
 
-    # Nenhuma empresa pode receber sinal de compra.
     if not (
         result[
             "TURNAROUND_OPERATIONAL_SIGNAL"
@@ -1340,22 +1029,47 @@ def _self_test():
         ==
         "BLOCKED_RESEARCH_ONLY"
     ).all():
-
         raise TurnaroundError(
             "SELF-TEST: sinal operacional foi "
             "liberado indevidamente."
         )
 
-    # Retorno futuro jamais pode ser usado.
     if (
         result[
             "FUTURE_RETURN_USED_TURNAROUND"
         ]
         .any()
     ):
-
         raise TurnaroundError(
             "SELF-TEST: retorno futuro utilizado."
+        )
+
+    # Fail-safe deve continuar bloqueando retorno futuro real.
+    contaminated = sample.copy()
+
+    contaminated[
+        "FUTURE_RETURN"
+    ] = [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5.0,
+    ]
+
+    future_blocked = False
+
+    try:
+        run_turnaround_engine(
+            contaminated,
+            FakeContext(),
+        )
+    except TurnaroundIntegrityError:
+        future_blocked = True
+
+    if not future_blocked:
+        raise TurnaroundError(
+            "SELF-TEST: retorno futuro real não foi bloqueado."
         )
 
     return True
@@ -1384,7 +1098,7 @@ if __name__ == "__main__":
     print("Full rule 2022 utilizada: NÃO")
     print("Multivariado 2018 utilizado: NÃO")
     print("Retorno futuro: NÃO UTILIZADO")
+    print("Fail-safe de retorno futuro: OK")
     print("Sinal operacional: BLOQUEADO")
     print("Validação temporal adicional: NECESSÁRIA")
-
     print("=" * 72)
