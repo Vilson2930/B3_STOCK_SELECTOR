@@ -779,17 +779,26 @@ def run_universe_stage(
             tuple,
         )
         and
-        len(result) == 2
+        len(result) in (2, 3)
     ):
 
         security_universe = result[0]
         issuer_universe = result[1]
 
+        # A terceira posição, quando presente, é a auditoria produzida
+        # pelo Universe Engine. Ela não altera seleção nem ranking.
+        universe_audit = (
+            result[2]
+            if len(result) == 3
+            else None
+        )
+
     else:
 
         raise PipelineIntegrityError(
             "FAIL-SAFE: build_universe deve retornar "
-            "dict ou tuple com universos de security e issuer."
+            "dict ou tuple com universos de security e issuer "
+            "(auditoria opcional como terceiro item)."
         )
 
     require_dataframe(
@@ -2227,4 +2236,3 @@ if __name__ == "__main__":
     print_run_summary(
         result
     )
-
