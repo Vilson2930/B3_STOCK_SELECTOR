@@ -5,19 +5,14 @@
 # RANKING ENGINE
 #
 # OBJETIVO:
-# Consolidar somente motores AUTORIZADOS em um ranking determinístico.
-#
-# PRINCÍPIOS:
-# - retorno futuro jamais entra como variável;
-# - fatores de pesquisa não entram silenciosamente;
-# - Turnaround fica bloqueado enquanto não houver validação temporal;
-# - scores inválidos não recebem imputação favorável;
-# - pesos devem estar explicitamente definidos;
-# - ranking deve ser reproduzível e auditável.
+# Consolidar somente motores autorizados em ranking determinístico.
 #
 # IMPORTANTE:
-# O ranking atual é uma arquitetura operacional de referência.
-# Ele NÃO declara que os pesos atuais são cientificamente ótimos.
+# - retorno futuro jamais entra como variável;
+# - Turnaround Research NÃO entra no ranking final;
+# - pesos 70/30 permanecem apenas como baseline de referência;
+# - não transforma pesquisa experimental em regra de produção;
+# - execução é determinística e auditável.
 # =============================================================================
 
 from __future__ import annotations
@@ -32,24 +27,66 @@ import pandas as pd
 
 # =============================================================================
 # CONFIG
+#
+# Importamos o módulo inteiro.
+# Assim a ausência de RANKING não é confundida com ausência de config.py.
 # =============================================================================
 
 try:
-    from config import (
-        OUTPUT_DIR,
-        RANKING,
-        TURNAROUND_ENGINE,
-    )
-
+    import config as project_config
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar config.py."
     ) from exc
 
 
+if not hasattr(project_config, "OUTPUT_DIR"):
+    raise RuntimeError(
+        "FAIL-SAFE: OUTPUT_DIR ausente em config.py."
+    )
+
+
+OUTPUT_DIR = project_config.OUTPUT_DIR
+
+
+RANKING = getattr(
+    project_config,
+    "RANKING",
+    getattr(
+        project_config,
+        "RANKING_ENGINE",
+        {},
+    ),
+)
+
+
+TURNAROUND_ENGINE = getattr(
+    project_config,
+    "TURNAROUND_ENGINE",
+    {},
+)
+
+
+if RANKING is None:
+    RANKING = {}
+
+if TURNAROUND_ENGINE is None:
+    TURNAROUND_ENGINE = {}
+
+if not isinstance(RANKING, dict):
+    raise RuntimeError(
+        "FAIL-SAFE: configuração RANKING/RANKING_ENGINE "
+        "deve ser um dicionário."
+    )
+
+if not isinstance(TURNAROUND_ENGINE, dict):
+    raise RuntimeError(
+        "FAIL-SAFE: TURNAROUND_ENGINE deve ser um dicionário."
+    )
+
+
 try:
     from data.pit import PITContext
-
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar PITContext."
@@ -60,11 +97,7 @@ except ImportError as exc:
 # DIRETÓRIO
 # =============================================================================
 
-RANKING_DIR = (
-    OUTPUT_DIR
-    / "ranking"
-)
-
+RANKING_DIR = OUTPUT_DIR / "ranking"
 RANKING_DIR.mkdir(
     parents=True,
     exist_ok=True,
@@ -84,21 +117,23 @@ class RankingIntegrityError(RankingError):
 
 
 class RankingAuthorizationError(RankingError):
-    """Tentativa de utilizar motor não autorizado."""
+    """Tentativa de utilizar componente não autorizado."""
 
 
 # =============================================================================
-# PESOS DE REFERÊNCIA
+# BASELINE DE REFERÊNCIA
 #
-# O estudo histórico anterior encontrou 70% Quality / 30% Valuation.
+# Resultado histórico anterior:
+#
+# Quality   70%
+# Valuation 30%
 #
 # IMPORTANTE:
-# Neste novo estudo esse resultado é REFERÊNCIA, não conclusão científica.
+# Isto permanece REFERÊNCIA.
+# Não é conclusão científica nova do estudo atual.
 #
-# Portanto:
-# - pode existir como baseline operacional;
-# - deve ficar explicitamente identificado como REFERENCE;
-# - não pode ser confundido com nova descoberta validada.
+# O Turnaround 50/30/20 desenvolvido no estudo atual continua sendo
+# pesquisa e NÃO entra silenciosamente neste ranking.
 # =============================================================================
 
 DEFAULT_ENGINE_WEIGHTS = {
@@ -109,7 +144,7 @@ DEFAULT_ENGINE_WEIGHTS = {
 
 
 # =============================================================================
-# COLUNAS PROIBIDAS
+# PROTEÇÃO CONTRA INFORMAÇÃO FUTURA
 # =============================================================================
 
 FORBIDDEN_TERMS = (
@@ -122,12 +157,22 @@ FORBIDDEN_TERMS = (
 )
 
 
+ALLOWED_FUTURE_AUDIT_COLUMNS = {
+    "FUTURE_RETURN_USED",
+    "FUTURE_RETURN_USED_QUALITY",
+    "FUTURE_RETURN_USED_TURNAROUND",
+    "FUTURE_RETURN_USED_VALUATION",
+    "FUTURE_RETURN_USED_RANKING",
+    "FUTURE_RETURN_USED_RISK",
+    "FUTURE_RETURN_USED_REPORT",
+}
+
+
 # =============================================================================
 # UTILIDADES
 # =============================================================================
 
 def _utc_now_iso() -> str:
-
     return datetime.now(
         timezone.utc
     ).isoformat()
@@ -138,17 +183,12 @@ def _require_dataframe(
     name: str,
 ) -> None:
 
-    if not isinstance(
-        df,
-        pd.DataFrame,
-    ):
-
+    if not isinstance(df, pd.DataFrame):
         raise RankingIntegrityError(
             f"{name} não é DataFrame."
         )
 
     if df.empty:
-
         raise RankingIntegrityError(
             f"FAIL-SAFE: {name} está vazio."
         )
@@ -171,43 +211,60 @@ def _require_columns(
     )
 
     if missing:
-
         raise RankingIntegrityError(
             f"FAIL-SAFE: {name} sem colunas obrigatórias: "
             f"{sorted(missing)}"
         )
 
 
-def _normalize_issuer_id(
-    value,
-):
+def _normalize_issuer_id(value):
 
     if pd.isna(value):
         return None
 
-    value = str(
-        value
-    ).strip()
+    value = str(value).strip()
 
     if not value:
         return None
 
     try:
-
-        numeric = float(
-            value
-        )
+        numeric = float(value)
 
         if numeric.is_integer():
-
-            return str(
-                int(numeric)
-            )
+            return str(int(numeric))
 
     except Exception:
         pass
 
     return value
+
+
+def _as_bool_series(
+    series: pd.Series,
+) -> pd.Series:
+
+    if pd.api.types.is_bool_dtype(series):
+        return (
+            series
+            .fillna(False)
+            .astype(bool)
+        )
+
+    normalized = (
+        series
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    return normalized.isin(
+        {
+            "TRUE",
+            "1",
+            "YES",
+            "SIM",
+        }
+    )
 
 
 # =============================================================================
@@ -220,34 +277,45 @@ def assert_no_future_information(
 
     forbidden = []
 
-    explicitly_allowed_metadata = {
-        "FUTURE_RETURN_USED",
-        "FUTURE_RETURN_USED_QUALITY",
-        "FUTURE_RETURN_USED_TURNAROUND",
-        "FUTURE_RETURN_USED_VALUATION",
-    }
-
     for column in df.columns:
 
-        normalized = (
-            str(column)
-            .upper()
-        )
+        normalized = str(column).upper()
 
-        if normalized in explicitly_allowed_metadata:
+        if normalized in ALLOWED_FUTURE_AUDIT_COLUMNS:
+
+            values = df[column].dropna()
+
+            if not values.empty:
+
+                normalized_values = (
+                    values
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                invalid = ~normalized_values.isin(
+                    {
+                        "FALSE",
+                        "0",
+                    }
+                )
+
+                if invalid.any():
+                    raise RankingIntegrityError(
+                        "FAIL-SAFE: metadado "
+                        f"{column} indica uso de retorno futuro."
+                    )
+
             continue
 
         if any(
             term in normalized
             for term in FORBIDDEN_TERMS
         ):
-
-            forbidden.append(
-                column
-            )
+            forbidden.append(column)
 
     if forbidden:
-
         raise RankingIntegrityError(
             "FAIL-SAFE: informação futura detectada "
             "no Ranking Engine: "
@@ -282,9 +350,7 @@ def validate_score(
     if invalid.any():
 
         examples = (
-            score.loc[
-                invalid
-            ]
+            score.loc[invalid]
             .head(10)
             .tolist()
         )
@@ -298,7 +364,7 @@ def validate_score(
 
 
 # =============================================================================
-# PREPARAÇÃO DE CADA MOTOR
+# QUALITY
 # =============================================================================
 
 def prepare_quality(
@@ -338,14 +404,12 @@ def prepare_quality(
         )
     )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
+    if result["ISSUER_ID"].isna().any():
+        raise RankingIntegrityError(
+            "FAIL-SAFE: ISSUER_ID ausente em Quality."
+        )
 
+    if result["ISSUER_ID"].duplicated().any():
         raise RankingIntegrityError(
             "FAIL-SAFE: emissor duplicado em Quality."
         )
@@ -359,8 +423,20 @@ def prepare_quality(
         "QUALITY_SCORE",
     )
 
+    result[
+        "QUALITY_SCORE_VALID"
+    ] = _as_bool_series(
+        result[
+            "QUALITY_SCORE_VALID"
+        ]
+    )
+
     return result
 
+
+# =============================================================================
+# VALUATION
+# =============================================================================
 
 def prepare_valuation(
     valuation: pd.DataFrame,
@@ -399,14 +475,12 @@ def prepare_valuation(
         )
     )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
+    if result["ISSUER_ID"].isna().any():
+        raise RankingIntegrityError(
+            "FAIL-SAFE: ISSUER_ID ausente em Valuation."
+        )
 
+    if result["ISSUER_ID"].duplicated().any():
         raise RankingIntegrityError(
             "FAIL-SAFE: emissor duplicado em Valuation."
         )
@@ -420,8 +494,23 @@ def prepare_valuation(
         "VALUATION_SCORE",
     )
 
+    result[
+        "VALUATION_SCORE_VALID"
+    ] = _as_bool_series(
+        result[
+            "VALUATION_SCORE_VALID"
+        ]
+    )
+
     return result
 
+
+# =============================================================================
+# TURNAROUND
+#
+# Somente auditoria.
+# O score de pesquisa NÃO entra no ranking final.
+# =============================================================================
 
 def prepare_turnaround(
     turnaround: pd.DataFrame | None,
@@ -444,12 +533,30 @@ def prepare_turnaround(
         turnaround
     )
 
+    columns = [
+        "ISSUER_ID",
+        "TURNAROUND_RESEARCH_SCORE",
+        "TURNAROUND_PRODUCTION_AUTHORIZED",
+    ]
+
+    if (
+        "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+        in turnaround.columns
+    ):
+        columns.append(
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+        )
+
+    if (
+        "TURNAROUND_SCORE_MODEL"
+        in turnaround.columns
+    ):
+        columns.append(
+            "TURNAROUND_SCORE_MODEL"
+        )
+
     result = turnaround[
-        [
-            "ISSUER_ID",
-            "TURNAROUND_RESEARCH_SCORE",
-            "TURNAROUND_PRODUCTION_AUTHORIZED",
-        ]
+        columns
     ].copy()
 
     result[
@@ -463,14 +570,12 @@ def prepare_turnaround(
         )
     )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
+    if result["ISSUER_ID"].isna().any():
+        raise RankingIntegrityError(
+            "FAIL-SAFE: ISSUER_ID ausente em Turnaround."
+        )
 
+    if result["ISSUER_ID"].duplicated().any():
         raise RankingIntegrityError(
             "FAIL-SAFE: emissor duplicado em Turnaround."
         )
@@ -482,6 +587,28 @@ def prepare_turnaround(
             "TURNAROUND_RESEARCH_SCORE"
         ],
         "TURNAROUND_RESEARCH_SCORE",
+    )
+
+    if (
+        "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+        in result.columns
+    ):
+
+        result[
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+        ] = validate_score(
+            result[
+                "TURNAROUND_RESEARCH_SCORE_COMPLETE"
+            ],
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE",
+        )
+
+    result[
+        "TURNAROUND_PRODUCTION_AUTHORIZED"
+    ] = _as_bool_series(
+        result[
+            "TURNAROUND_PRODUCTION_AUTHORIZED"
+        ]
     )
 
     return result
@@ -498,54 +625,48 @@ def resolve_engine_weights() -> dict:
         DEFAULT_ENGINE_WEIGHTS,
     )
 
+    if configured is None:
+        configured = DEFAULT_ENGINE_WEIGHTS
+
+    if not isinstance(configured, dict):
+        raise RankingIntegrityError(
+            "FAIL-SAFE: engine_weights deve ser dicionário."
+        )
+
     weights = {
-        "QUALITY":
-            float(
-                configured.get(
-                    "QUALITY",
-                    DEFAULT_ENGINE_WEIGHTS[
-                        "QUALITY"
-                    ],
-                )
-            ),
-
-        "VALUATION":
-            float(
-                configured.get(
-                    "VALUATION",
-                    DEFAULT_ENGINE_WEIGHTS[
-                        "VALUATION"
-                    ],
-                )
-            ),
-
-        "TURNAROUND":
-            float(
-                configured.get(
-                    "TURNAROUND",
-                    DEFAULT_ENGINE_WEIGHTS[
-                        "TURNAROUND"
-                    ],
-                )
-            ),
+        "QUALITY": float(
+            configured.get(
+                "QUALITY",
+                DEFAULT_ENGINE_WEIGHTS["QUALITY"],
+            )
+        ),
+        "VALUATION": float(
+            configured.get(
+                "VALUATION",
+                DEFAULT_ENGINE_WEIGHTS["VALUATION"],
+            )
+        ),
+        "TURNAROUND": float(
+            configured.get(
+                "TURNAROUND",
+                DEFAULT_ENGINE_WEIGHTS["TURNAROUND"],
+            )
+        ),
     }
 
     for engine, weight in weights.items():
 
         if (
-            not np.isfinite(
-                weight
-            )
+            not np.isfinite(weight)
             or
             weight < 0
         ):
-
             raise RankingIntegrityError(
                 f"Peso inválido para {engine}: {weight}"
             )
 
     # -------------------------------------------------------------------------
-    # TRAVA TURNAROUND
+    # TRAVA CIENTÍFICA DO TURNAROUND
     # -------------------------------------------------------------------------
 
     turnaround_authorized = bool(
@@ -556,14 +677,10 @@ def resolve_engine_weights() -> dict:
     )
 
     if (
-        weights[
-            "TURNAROUND"
-        ]
-        > 0
+        weights["TURNAROUND"] > 0
         and
         not turnaround_authorized
     ):
-
         raise RankingAuthorizationError(
             "FAIL-SAFE: tentativa de dar peso ao "
             "Turnaround sem autorização científica "
@@ -575,24 +692,15 @@ def resolve_engine_weights() -> dict:
     )
 
     if total <= 0:
-
         raise RankingIntegrityError(
             "FAIL-SAFE: soma dos pesos é zero."
         )
 
-    # -------------------------------------------------------------------------
-    # NORMALIZAÇÃO
-    # -------------------------------------------------------------------------
-
-    weights = {
-        engine:
-            weight / total
-
+    return {
+        engine: weight / total
         for engine, weight
         in weights.items()
     }
-
-    return weights
 
 
 # =============================================================================
@@ -644,10 +752,7 @@ def calculate_ranking_eligibility(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     quality_valid = (
         result[
@@ -665,12 +770,8 @@ def calculate_ranking_eligibility(
         .astype(bool)
     )
 
-    # -------------------------------------------------------------------------
-    # Para o baseline atual exigimos as duas camadas válidas.
-    #
-    # Não imputamos score ausente como 0.50 porque isso poderia promover
-    # artificialmente uma empresa com informação incompleta.
-    # -------------------------------------------------------------------------
+    # Baseline exige as duas camadas.
+    # Não existe imputação favorável para score ausente.
 
     result[
         "RANKING_ELIGIBLE"
@@ -720,10 +821,7 @@ def calculate_final_score(
     weights: dict,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     result[
         "FINAL_SCORE"
@@ -740,50 +838,57 @@ def calculate_final_score(
     if not eligible.any():
         return result
 
+    # -------------------------------------------------------------------------
+    # TURNAROUND RESEARCH NÃO ENTRA.
+    # -------------------------------------------------------------------------
+
+    if weights["TURNAROUND"] > 0:
+
+        raise RankingAuthorizationError(
+            "FAIL-SAFE: Turnaround possui peso positivo, "
+            "mas ainda não existe TURNAROUND_PRODUCTION_SCORE "
+            "implementado e temporalmente validado. "
+            "TURNAROUND_RESEARCH_SCORE não pode entrar no ranking."
+        )
+
+    operational_weight = (
+        weights["QUALITY"]
+        +
+        weights["VALUATION"]
+    )
+
+    if operational_weight <= 0:
+        raise RankingIntegrityError(
+            "FAIL-SAFE: Quality + Valuation possuem peso zero."
+        )
+
+    quality_weight = (
+        weights["QUALITY"]
+        /
+        operational_weight
+    )
+
+    valuation_weight = (
+        weights["VALUATION"]
+        /
+        operational_weight
+    )
+
     score = (
-        weights[
-            "QUALITY"
-        ]
+        quality_weight
         *
         result.loc[
             eligible,
             "QUALITY_SCORE",
         ]
         +
-        weights[
-            "VALUATION"
-        ]
+        valuation_weight
         *
         result.loc[
             eligible,
             "VALUATION_SCORE",
         ]
     )
-
-    # -------------------------------------------------------------------------
-    # TURNAROUND
-    #
-    # Somente entra se:
-    # 1. peso > 0;
-    # 2. produção autorizada;
-    # 3. score operacional validado existir.
-    #
-    # O score de PESQUISA jamais entra diretamente.
-    # -------------------------------------------------------------------------
-
-    if (
-        weights[
-            "TURNAROUND"
-        ]
-        > 0
-    ):
-
-        raise RankingAuthorizationError(
-            "FAIL-SAFE: Turnaround possui peso positivo, "
-            "mas ainda não existe TURNAROUND_PRODUCTION_SCORE "
-            "implementado e validado. "
-            "TURNAROUND_RESEARCH_SCORE não pode entrar no ranking."
-        )
 
     result.loc[
         eligible,
@@ -806,17 +911,14 @@ def calculate_final_score(
 
 
 # =============================================================================
-# RANKING
+# RANK FINAL
 # =============================================================================
 
 def assign_final_rank(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     result[
         "FINAL_RANK"
@@ -878,10 +980,8 @@ def run_ranking_engine(
         turnaround=turnaround,
     )
 
-    merged = (
-        calculate_ranking_eligibility(
-            merged
-        )
+    merged = calculate_ranking_eligibility(
+        merged
     )
 
     result = calculate_final_score(
@@ -893,13 +993,9 @@ def run_ranking_engine(
         result
     )
 
-    # -------------------------------------------------------------------------
-    # METADADOS
-    # -------------------------------------------------------------------------
-
     result[
         "RANKING_ENGINE_VERSION"
-    ] = "0.1.0"
+    ] = "0.1.1"
 
     result[
         "RANKING_MODEL"
@@ -939,10 +1035,6 @@ def run_ranking_engine(
         "TURNAROUND_RESEARCH_USED_IN_RANKING"
     ] = False
 
-    # -------------------------------------------------------------------------
-    # ORDENAÇÃO DETERMINÍSTICA
-    # -------------------------------------------------------------------------
-
     result = (
         result
         .sort_values(
@@ -967,30 +1059,19 @@ def run_ranking_engine(
         result
     )
 
-    # -------------------------------------------------------------------------
-    # FAIL-SAFE FINAL
-    # -------------------------------------------------------------------------
-
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
-
+    if result["ISSUER_ID"].duplicated().any():
         raise RankingIntegrityError(
-            "FAIL-SAFE: emissor duplicado "
-            "no ranking final."
+            "FAIL-SAFE: emissor duplicado no ranking final."
         )
 
     if (
         result[
             "TURNAROUND_RESEARCH_USED_IN_RANKING"
         ]
+        .fillna(False)
+        .astype(bool)
         .any()
     ):
-
         raise RankingAuthorizationError(
             "FAIL-SAFE: sinal de pesquisa Turnaround "
             "entrou no ranking."
@@ -1009,7 +1090,6 @@ def select_top_n(
 ) -> pd.DataFrame:
 
     if n <= 0:
-
         raise RankingIntegrityError(
             "n deve ser maior que zero."
         )
@@ -1049,9 +1129,7 @@ def select_top_n(
             ],
             kind="mergesort",
         )
-        .head(
-            n
-        )
+        .head(n)
         .copy()
     )
 
@@ -1061,9 +1139,7 @@ def select_top_n(
 
     selected[
         "SELECTION_SIZE_REQUESTED"
-    ] = int(
-        n
-    )
+    ] = int(n)
 
     return selected
 
@@ -1092,28 +1168,19 @@ def audit_ranking(
     weights = resolve_engine_weights()
 
     return {
-        "status":
-            "OK",
+        "status": "OK",
 
         "model":
             "QUALITY_VALUATION_REFERENCE",
 
         "issuers_total":
-            int(
-                len(
-                    result
-                )
-            ),
+            int(len(result)),
 
         "issuers_eligible":
-            int(
-                eligible.sum()
-            ),
+            int(eligible.sum()),
 
         "eligibility_rate":
-            float(
-                eligible.mean()
-            ),
+            float(eligible.mean()),
 
         "weights":
             weights,
@@ -1160,9 +1227,7 @@ def save_ranking(
     date_tag = (
         context
         .formation_date
-        .strftime(
-            "%Y%m%d"
-        )
+        .strftime("%Y%m%d")
     )
 
     ranking_path = (
@@ -1196,6 +1261,9 @@ def save_ranking(
         "engine":
             "RANKING_ENGINE",
 
+        "version":
+            "0.1.1",
+
         "created_at_utc":
             _utc_now_iso(),
 
@@ -1214,22 +1282,16 @@ def save_ranking(
             ),
 
         "selection_size":
-            int(
-                top_n
-            ),
+            int(top_n),
 
         **audit,
 
         "files": {
             "ranking":
-                str(
-                    ranking_path
-                ),
+                str(ranking_path),
 
             "selected":
-                str(
-                    selected_path
-                ),
+                str(selected_path),
         },
     }
 
@@ -1321,10 +1383,22 @@ def _self_test():
                 1.00,
             ],
 
+            "TURNAROUND_RESEARCH_SCORE_COMPLETE": [
+                0.10,
+                0.20,
+                1.00,
+            ],
+
             "TURNAROUND_PRODUCTION_AUTHORIZED": [
                 False,
                 False,
                 False,
+            ],
+
+            "TURNAROUND_SCORE_MODEL": [
+                "MB_50_ML_30_ROE_20_RESEARCH",
+                "MB_50_ML_30_ROE_20_RESEARCH",
+                "MB_50_ML_30_ROE_20_RESEARCH",
             ],
         }
     )
@@ -1353,11 +1427,28 @@ def _self_test():
         )
     )
 
-    # 70% Quality + 30% Valuation
-    expected_1 = (
-        0.70 * 0.90
+    weights = resolve_engine_weights()
+
+    operational_total = (
+        weights["QUALITY"]
         +
-        0.30 * 0.50
+        weights["VALUATION"]
+    )
+
+    expected_1 = (
+        (
+            weights["QUALITY"]
+            /
+            operational_total
+        )
+        * 0.90
+        +
+        (
+            weights["VALUATION"]
+            /
+            operational_total
+        )
+        * 0.50
     )
 
     if not np.isclose(
@@ -1367,35 +1458,65 @@ def _self_test():
         ],
         expected_1,
     ):
-
         raise RankingError(
             "SELF-TEST: score final incorreto."
         )
 
-    # Empresa 3 possui Turnaround Research Score = 1.00.
-    # Isso NÃO pode ajudá-la no ranking.
-    if not (
+    # O emissor 3 possui Turnaround Research = 1.
+    # Isso não pode ajudá-lo no ranking de produção.
+
+    if bool(
         indexed.loc[
             "3",
-            "TURNAROUND_RESEARCH_USED_IN_RANKING"
+            "TURNAROUND_RESEARCH_USED_IN_RANKING",
         ]
-        == False
     ):
-
         raise RankingError(
-            "SELF-TEST: Turnaround experimental "
-            "entrou no ranking."
+            "SELF-TEST: Turnaround experimental entrou no ranking."
         )
 
     if (
         result[
             "FUTURE_RETURN_USED_RANKING"
         ]
+        .fillna(False)
+        .astype(bool)
         .any()
     ):
-
         raise RankingError(
             "SELF-TEST: retorno futuro utilizado."
+        )
+
+    # -------------------------------------------------------------------------
+    # TESTE DE CONTAMINAÇÃO FUTURA
+    # -------------------------------------------------------------------------
+
+    contaminated = quality.copy()
+
+    contaminated[
+        "FUTURE_RETURN"
+    ] = [
+        1.0,
+        2.0,
+        3.0,
+    ]
+
+    future_blocked = False
+
+    try:
+        run_ranking_engine(
+            quality=contaminated,
+            valuation=valuation,
+            turnaround=turnaround,
+            context=FakeContext(),
+        )
+
+    except RankingIntegrityError:
+        future_blocked = True
+
+    if not future_blocked:
+        raise RankingError(
+            "SELF-TEST: retorno futuro real não foi bloqueado."
         )
 
     return True
@@ -1413,12 +1534,18 @@ if __name__ == "__main__":
 
     _self_test()
 
+    weights = resolve_engine_weights()
+
     print("Self-test: OK")
-    print("Quality: AUTORIZADO")
-    print("Valuation: AUTORIZADO COMO REFERÊNCIA")
-    print("Turnaround Research: BLOQUEADO")
+    print("Quality: BASELINE AUTORIZADO")
+    print("Valuation: BASELINE DE REFERÊNCIA")
+    print("Turnaround Research 50/30/20: BLOQUEADO NO RANKING")
     print("Retorno futuro: PROIBIDO")
-    print("Pesos atuais: 70% Quality / 30% Valuation")
+    print(
+        "Pesos atuais: "
+        f"{weights['QUALITY']:.0%} Quality / "
+        f"{weights['VALUATION']:.0%} Valuation"
+    )
     print("Status dos pesos: REFERÊNCIA, NÃO NOVA CONCLUSÃO")
     print("Missing score: NÃO RECEBE IMPUTAÇÃO FAVORÁVEL")
     print("Ranking: DETERMINÍSTICO")
