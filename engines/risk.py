@@ -24,17 +24,6 @@
 # - utilizar retorno futuro;
 # - otimizar carteira usando retorno futuro;
 # - estimar retorno esperado.
-#
-# PRINCÍPIO:
-# Ranking responde:
-#     "quais empresas aparecem primeiro?"
-#
-# Risk responde:
-#     "quanto dessa ordem pode entrar na carteira sem concentração indevida?"
-#
-# IMPORTANTE:
-# Limites quantitativos devem vir de config.py.
-# Este módulo NÃO inventa limites científicos silenciosamente.
 # =============================================================================
 
 from __future__ import annotations
@@ -53,26 +42,28 @@ import pandas as pd
 
 try:
     import config as project_config
-    from config import OUTPUT_DIR
-
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar config.py."
     ) from exc
 
 
+if not hasattr(project_config, "OUTPUT_DIR"):
+    raise RuntimeError(
+        "FAIL-SAFE: OUTPUT_DIR ausente em config.py."
+    )
+
+
+OUTPUT_DIR = project_config.OUTPUT_DIR
+
+
 try:
     from data.pit import PITContext
-
 except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar PITContext."
     ) from exc
 
-
-# =============================================================================
-# CONFIGURAÇÃO DE RISCO
-# =============================================================================
 
 RISK_CONFIG = getattr(
     project_config,
@@ -80,21 +71,20 @@ RISK_CONFIG = getattr(
     {},
 )
 
-if not isinstance(
-    RISK_CONFIG,
-    dict,
-):
+if RISK_CONFIG is None:
     RISK_CONFIG = {}
+
+if not isinstance(RISK_CONFIG, dict):
+    raise RuntimeError(
+        "FAIL-SAFE: RISK deve ser dicionário."
+    )
 
 
 # =============================================================================
 # DIRETÓRIO
 # =============================================================================
 
-RISK_DIR = (
-    OUTPUT_DIR
-    / "risk"
-)
+RISK_DIR = OUTPUT_DIR / "risk"
 
 RISK_DIR.mkdir(
     parents=True,
@@ -146,12 +136,16 @@ FORBIDDEN_TERMS = (
     "TARGET_RETURN",
 )
 
+
+# Metadados de auditoria são permitidos somente se indicarem False.
 ALLOWED_METADATA = {
     "FUTURE_RETURN_USED",
     "FUTURE_RETURN_USED_QUALITY",
     "FUTURE_RETURN_USED_TURNAROUND",
     "FUTURE_RETURN_USED_VALUATION",
     "FUTURE_RETURN_USED_RANKING",
+    "FUTURE_RETURN_USED_RISK",
+    "FUTURE_RETURN_USED_REPORT",
 }
 
 
@@ -160,7 +154,6 @@ ALLOWED_METADATA = {
 # =============================================================================
 
 def _utc_now_iso() -> str:
-
     return datetime.now(
         timezone.utc
     ).isoformat()
@@ -171,17 +164,12 @@ def _require_dataframe(
     name: str,
 ) -> None:
 
-    if not isinstance(
-        df,
-        pd.DataFrame,
-    ):
-
+    if not isinstance(df, pd.DataFrame):
         raise RiskIntegrityError(
             f"{name} não é DataFrame."
         )
 
     if df.empty:
-
         raise RiskIntegrityError(
             f"FAIL-SAFE: {name} está vazio."
         )
@@ -204,43 +192,64 @@ def _require_columns(
     )
 
     if missing:
-
         raise RiskIntegrityError(
             f"FAIL-SAFE: {name} sem colunas obrigatórias: "
             f"{sorted(missing)}"
         )
 
 
-def _normalize_issuer_id(
-    value,
-):
+def _normalize_issuer_id(value):
 
     if pd.isna(value):
         return None
 
-    value = str(
-        value
-    ).strip()
+    value = str(value).strip()
 
     if not value:
         return None
 
     try:
-
-        numeric = float(
-            value
-        )
+        numeric = float(value)
 
         if numeric.is_integer():
-
-            return str(
-                int(numeric)
-            )
+            return str(int(numeric))
 
     except Exception:
         pass
 
     return value
+
+
+def _metadata_is_false(
+    series: pd.Series,
+) -> bool:
+
+    values = series.dropna()
+
+    if values.empty:
+        return True
+
+    normalized = (
+        values
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    allowed_false = {
+        "FALSE",
+        "0",
+        "0.0",
+        "NO",
+        "NAO",
+        "NÃO",
+    }
+
+    return bool(
+        normalized.isin(
+            allowed_false
+        ).all()
+    )
 
 
 # =============================================================================
@@ -255,25 +264,32 @@ def assert_no_future_information(
 
     for column in df.columns:
 
-        normalized = (
-            str(column)
-            .upper()
-        )
+        normalized = str(
+            column
+        ).upper()
 
         if normalized in ALLOWED_METADATA:
+
+            if not _metadata_is_false(
+                df[column]
+            ):
+                raise RiskIntegrityError(
+                    "FAIL-SAFE: metadado de auditoria "
+                    f"{column} indica utilização de "
+                    "informação futura."
+                )
+
             continue
 
         if any(
             term in normalized
             for term in FORBIDDEN_TERMS
         ):
-
             forbidden.append(
                 column
             )
 
     if forbidden:
-
         raise RiskIntegrityError(
             "FAIL-SAFE: informação futura detectada "
             "no Risk Engine: "
@@ -304,7 +320,6 @@ def assert_turnaround_research_not_used(
     )
 
     if used.any():
-
         raise RiskIntegrityError(
             "FAIL-SAFE: ranking contém utilização "
             "do Turnaround Research."
@@ -331,13 +346,11 @@ def _get_positive_int(
         )
 
     except Exception as exc:
-
         raise RiskConfigurationError(
             f"Configuração {key} inválida: {value}"
         ) from exc
 
     if value <= 0:
-
         raise RiskConfigurationError(
             f"{key} deve ser > 0."
         )
@@ -346,11 +359,6 @@ def _get_positive_int(
 
 
 def resolve_risk_config() -> dict:
-    """
-    Resolve apenas parâmetros operacionais.
-
-    Defaults aqui são estruturais, não resultados de otimização histórica.
-    """
 
     max_positions = _get_positive_int(
         "max_positions",
@@ -363,7 +371,6 @@ def resolve_risk_config() -> dict:
     )
 
     if min_positions > max_positions:
-
         raise RiskConfigurationError(
             "min_positions não pode ser maior "
             "que max_positions."
@@ -377,13 +384,11 @@ def resolve_risk_config() -> dict:
     if max_sector_weight is not None:
 
         try:
-
             max_sector_weight = float(
                 max_sector_weight
             )
 
         except Exception as exc:
-
             raise RiskConfigurationError(
                 "max_sector_weight inválido."
             ) from exc
@@ -391,7 +396,6 @@ def resolve_risk_config() -> dict:
         if not (
             0 < max_sector_weight <= 1
         ):
-
             raise RiskConfigurationError(
                 "max_sector_weight deve estar "
                 "entre 0 e 1."
@@ -409,24 +413,16 @@ def resolve_risk_config() -> dict:
     }
 
     if weighting_method not in allowed_weighting:
-
         raise RiskConfigurationError(
             "Método de pesos não autorizado. "
             f"Permitidos={sorted(allowed_weighting)}"
         )
 
     return {
-        "max_positions":
-            max_positions,
-
-        "min_positions":
-            min_positions,
-
-        "max_sector_weight":
-            max_sector_weight,
-
-        "weighting_method":
-            weighting_method,
+        "max_positions": max_positions,
+        "min_positions": min_positions,
+        "max_sector_weight": max_sector_weight,
+        "weighting_method": weighting_method,
     }
 
 
@@ -459,10 +455,7 @@ def prepare_ranking(
         ranking
     )
 
-    result = (
-        ranking
-        .copy()
-    )
+    result = ranking.copy()
 
     result[
         "ISSUER_ID"
@@ -475,26 +468,16 @@ def prepare_ranking(
         )
     )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .isna()
-        .any()
-    ):
-
+    if result[
+        "ISSUER_ID"
+    ].isna().any():
         raise RiskIntegrityError(
             "FAIL-SAFE: ISSUER_ID ausente."
         )
 
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
-
+    if result[
+        "ISSUER_ID"
+    ].duplicated().any():
         raise RiskIntegrityError(
             "FAIL-SAFE: emissor duplicado "
             "no ranking."
@@ -537,18 +520,15 @@ def prepare_ranking(
         (
             result[
                 "FINAL_SCORE"
-            ]
-            .lt(0)
+            ].lt(0)
             |
             result[
                 "FINAL_SCORE"
-            ]
-            .gt(1)
+            ].gt(1)
         )
     )
 
     if invalid_score.any():
-
         raise RiskIntegrityError(
             "FAIL-SAFE: FINAL_SCORE fora "
             "do intervalo [0,1]."
@@ -564,11 +544,6 @@ def prepare_ranking(
 def resolve_sector_column(
     df: pd.DataFrame,
 ) -> Optional[str]:
-    """
-    Usa somente informação setorial já existente.
-
-    Não reconstrói classificação.
-    """
 
     candidates = (
         "FCA_SETOR_ATIVIDADE",
@@ -597,14 +572,6 @@ def _max_sector_positions(
     if max_sector_weight is None:
         return None
 
-    # Equal weight:
-    #
-    # peso aproximado por posição = 1 / max_positions
-    #
-    # número máximo por setor:
-    # floor(max_sector_weight * max_positions)
-    #
-    # pelo menos 1 posição.
     limit = int(
         np.floor(
             max_sector_weight
@@ -628,10 +595,7 @@ def apply_risk_selection(
     risk_config: dict,
 ) -> pd.DataFrame:
 
-    result = (
-        ranking
-        .copy()
-    )
+    result = ranking.copy()
 
     max_positions = int(
         risk_config[
@@ -645,22 +609,14 @@ def apply_risk_selection(
         ]
     )
 
-    sector_column = (
-        resolve_sector_column(
-            result
-        )
+    sector_column = resolve_sector_column(
+        result
     )
 
-    sector_position_limit = (
-        _max_sector_positions(
-            max_positions,
-            max_sector_weight,
-        )
+    sector_position_limit = _max_sector_positions(
+        max_positions,
+        max_sector_weight,
     )
-
-    # -------------------------------------------------------------------------
-    # STATUS INICIAL
-    # -------------------------------------------------------------------------
 
     result[
         "RISK_STATUS"
@@ -674,10 +630,6 @@ def apply_risk_selection(
         "RISK_SELECTED"
     ] = False
 
-    # -------------------------------------------------------------------------
-    # ELEGÍVEIS
-    # -------------------------------------------------------------------------
-
     eligible_mask = (
         result[
             "RANKING_ELIGIBLE"
@@ -685,13 +637,11 @@ def apply_risk_selection(
         &
         result[
             "FINAL_SCORE"
-        ]
-        .notna()
+        ].notna()
         &
         result[
             "FINAL_RANK"
-        ]
-        .notna()
+        ].notna()
     )
 
     invalid_score_mask = (
@@ -702,13 +652,11 @@ def apply_risk_selection(
         (
             result[
                 "FINAL_SCORE"
-            ]
-            .isna()
+            ].isna()
             |
             result[
                 "FINAL_RANK"
-            ]
-            .isna()
+            ].isna()
         )
     )
 
@@ -742,12 +690,7 @@ def apply_risk_selection(
     )
 
     selected_indices = []
-
     sector_counts = {}
-
-    # -------------------------------------------------------------------------
-    # CAMINHA NA ORDEM DO RANKING
-    # -------------------------------------------------------------------------
 
     for index, row in candidates.iterrows():
 
@@ -767,10 +710,6 @@ def apply_risk_selection(
 
             continue
 
-        # ---------------------------------------------------------------------
-        # CONTROLE SETORIAL
-        # ---------------------------------------------------------------------
-
         if (
             sector_column is not None
             and
@@ -784,11 +723,9 @@ def apply_risk_selection(
             if pd.isna(
                 sector_value
             ):
-
                 sector_key = "__UNKNOWN__"
 
             else:
-
                 sector_key = str(
                     sector_value
                 ).strip()
@@ -821,12 +758,7 @@ def apply_risk_selection(
                 continue
 
         else:
-
             sector_key = None
-
-        # ---------------------------------------------------------------------
-        # SELECIONA
-        # ---------------------------------------------------------------------
 
         selected_indices.append(
             index
@@ -856,13 +788,8 @@ def apply_risk_selection(
                     sector_key,
                     0,
                 )
-                +
-                1
+                + 1
             )
-
-    # -------------------------------------------------------------------------
-    # CANDIDATOS NÃO VISITADOS APÓS LIMITE
-    # -------------------------------------------------------------------------
 
     remaining_eligible = (
         eligible_mask
@@ -873,8 +800,7 @@ def apply_risk_selection(
         &
         result[
             "RISK_STATUS"
-        ]
-        .eq(
+        ].eq(
             STATUS_NOT_ELIGIBLE
         )
     )
@@ -901,10 +827,7 @@ def assign_portfolio_weights(
     risk_config: dict,
 ) -> pd.DataFrame:
 
-    result = (
-        df
-        .copy()
-    )
+    result = df.copy()
 
     result[
         "PORTFOLIO_WEIGHT"
@@ -945,7 +868,6 @@ def assign_portfolio_weights(
         ] = weight
 
     else:
-
         raise RiskConfigurationError(
             f"Método não implementado: {method}"
         )
@@ -953,8 +875,7 @@ def assign_portfolio_weights(
     total_weight = float(
         result[
             "PORTFOLIO_WEIGHT"
-        ]
-        .sum()
+        ].sum()
     )
 
     if not np.isclose(
@@ -962,7 +883,6 @@ def assign_portfolio_weights(
         1.0,
         atol=1e-10,
     ):
-
         raise RiskIntegrityError(
             "FAIL-SAFE: pesos da carteira "
             f"não somam 1. Soma={total_weight}"
@@ -1001,14 +921,11 @@ def calculate_concentration_audit(
     largest_position = float(
         selected[
             "PORTFOLIO_WEIGHT"
-        ]
-        .max()
+        ].max()
     )
 
-    sector_column = (
-        resolve_sector_column(
-            selected
-        )
+    sector_column = resolve_sector_column(
+        selected
     )
 
     sector_weights = {}
@@ -1052,9 +969,7 @@ def calculate_concentration_audit(
         )
 
         sector_weights = {
-            str(key):
-                float(value)
-
+            str(key): float(value)
             for key, value
             in sector_weights.items()
         }
@@ -1066,10 +981,8 @@ def calculate_concentration_audit(
                     selected
                 )
             ),
-
         "largest_position_weight":
             largest_position,
-
         "sector_weights":
             sector_weights,
     }
@@ -1084,9 +997,7 @@ def run_risk_engine(
     context: PITContext,
 ) -> pd.DataFrame:
 
-    risk_config = (
-        resolve_risk_config()
-    )
+    risk_config = resolve_risk_config()
 
     base = prepare_ranking(
         ranking
@@ -1105,13 +1016,8 @@ def run_risk_engine(
     selected_count = int(
         result[
             "RISK_SELECTED"
-        ]
-        .sum()
+        ].sum()
     )
-
-    # -------------------------------------------------------------------------
-    # FAIL-SAFE DE QUANTIDADE
-    # -------------------------------------------------------------------------
 
     if (
         selected_count
@@ -1120,18 +1026,10 @@ def run_risk_engine(
             "max_positions"
         ]
     ):
-
         raise RiskIntegrityError(
             "FAIL-SAFE: quantidade selecionada "
             "superou max_positions."
         )
-
-    # -------------------------------------------------------------------------
-    # MIN POSITIONS
-    #
-    # Não inventamos ativos para completar carteira.
-    # Apenas registramos se a quantidade mínima não foi atingida.
-    # -------------------------------------------------------------------------
 
     minimum_reached = (
         selected_count
@@ -1145,13 +1043,9 @@ def run_risk_engine(
         "MIN_POSITIONS_REACHED"
     ] = minimum_reached
 
-    # -------------------------------------------------------------------------
-    # METADADOS
-    # -------------------------------------------------------------------------
-
     result[
         "RISK_ENGINE_VERSION"
-    ] = "0.1.0"
+    ] = "0.1.1"
 
     result[
         "FORMATION_DATE_RISK"
@@ -1172,10 +1066,6 @@ def run_risk_engine(
     result[
         "TURNAROUND_RESEARCH_USED_RISK"
     ] = False
-
-    # -------------------------------------------------------------------------
-    # ORDEM FINAL
-    # -------------------------------------------------------------------------
 
     result = (
         result
@@ -1267,9 +1157,7 @@ def audit_risk(
         "risk_result",
     )
 
-    risk_config = (
-        resolve_risk_config()
-    )
+    risk_config = resolve_risk_config()
 
     selected = (
         result[
@@ -1296,66 +1184,51 @@ def audit_risk(
     )
 
     return {
-        "status":
-            "OK",
-
+        "status": "OK",
         "issuers_total":
             int(
                 len(
                     result
                 )
             ),
-
         "selected":
             int(
                 selected.sum()
             ),
-
         "selection_rate":
             float(
                 selected.mean()
             ),
-
         "max_positions":
             risk_config[
                 "max_positions"
             ],
-
         "min_positions":
             risk_config[
                 "min_positions"
             ],
-
         "min_positions_reached":
             bool(
                 result[
                     "MIN_POSITIONS_REACHED"
-                ]
-                .iloc[0]
+                ].iloc[0]
             ),
-
         "max_sector_weight":
             risk_config[
                 "max_sector_weight"
             ],
-
         "weighting_method":
             risk_config[
                 "weighting_method"
             ],
-
         "reasons":
             reason_counts,
-
         "concentration":
             concentration,
-
         "future_return_used":
             False,
-
         "turnaround_research_used":
             False,
-
         "return_optimization_performed":
             False,
     }
@@ -1418,39 +1291,34 @@ def save_risk(
     manifest = {
         "engine":
             "RISK_ENGINE",
-
+        "version":
+            "0.1.1",
         "created_at_utc":
             _utc_now_iso(),
-
         "formation_date":
             str(
                 context
                 .formation_date
                 .date()
             ),
-
         "accounting_cutoff":
             str(
                 context
                 .accounting_cutoff
                 .date()
             ),
-
         "market_cutoff":
             str(
                 context
                 .market_cutoff
                 .date()
             ),
-
         **audit,
-
         "files": {
             "risk":
                 str(
                     risk_path
                 ),
-
             "portfolio":
                 str(
                     portfolio_path
@@ -1473,10 +1341,8 @@ def save_risk(
     return {
         "risk":
             risk_path,
-
         "portfolio":
             portfolio_path,
-
         "manifest":
             manifest_path,
     }
@@ -1496,36 +1362,37 @@ def _self_test():
                 "3",
                 "4",
             ],
-
             "FINAL_SCORE": [
                 0.90,
                 0.80,
                 0.70,
                 0.60,
             ],
-
             "FINAL_RANK": [
                 1,
                 2,
                 3,
                 4,
             ],
-
             "RANKING_ELIGIBLE": [
                 True,
                 True,
                 True,
                 True,
             ],
-
             "FCA_SETOR_ATIVIDADE": [
                 "INDUSTRIA",
                 "INDUSTRIA",
                 "ENERGIA",
                 "LOGISTICA",
             ],
-
             "TURNAROUND_RESEARCH_USED_IN_RANKING": [
+                False,
+                False,
+                False,
+                False,
+            ],
+            "FUTURE_RETURN_USED_RANKING": [
                 False,
                 False,
                 False,
@@ -1562,7 +1429,6 @@ def _self_test():
     )
 
     if selected.empty:
-
         raise RiskError(
             "SELF-TEST: nenhuma empresa selecionada."
         )
@@ -1570,11 +1436,9 @@ def _self_test():
     if (
         selected[
             "FINAL_RANK"
-        ]
-        .min()
+        ].min()
         != 1
     ):
-
         raise RiskError(
             "SELF-TEST: primeira empresa do ranking "
             "não foi preservada."
@@ -1583,11 +1447,9 @@ def _self_test():
     if not np.isclose(
         selected[
             "PORTFOLIO_WEIGHT"
-        ]
-        .sum(),
+        ].sum(),
         1.0,
     ):
-
         raise RiskError(
             "SELF-TEST: pesos não somam 100%."
         )
@@ -1596,9 +1458,10 @@ def _self_test():
         result[
             "FUTURE_RETURN_USED_RISK"
         ]
+        .fillna(False)
+        .astype(bool)
         .any()
     ):
-
         raise RiskError(
             "SELF-TEST: retorno futuro utilizado."
         )
@@ -1607,11 +1470,63 @@ def _self_test():
         result[
             "TURNAROUND_RESEARCH_USED_RISK"
         ]
+        .fillna(False)
+        .astype(bool)
         .any()
     ):
-
         raise RiskError(
             "SELF-TEST: Turnaround Research utilizado."
+        )
+
+    # Teste obrigatório:
+    # metadado de auditoria True deve ser bloqueado.
+
+    contaminated = sample.copy()
+
+    contaminated[
+        "FUTURE_RETURN_USED_RANKING"
+    ] = True
+
+    blocked = False
+
+    try:
+        run_risk_engine(
+            contaminated,
+            FakeContext(),
+        )
+
+    except RiskIntegrityError:
+        blocked = True
+
+    if not blocked:
+        raise RiskError(
+            "SELF-TEST: metadado de retorno futuro "
+            "True não foi bloqueado."
+        )
+
+    # Variável real de retorno futuro também deve ser bloqueada.
+
+    contaminated = sample.copy()
+
+    contaminated[
+        "FUTURE_RETURN"
+    ] = 1.0
+
+    blocked = False
+
+    try:
+        run_risk_engine(
+            contaminated,
+            FakeContext(),
+        )
+
+    except RiskIntegrityError:
+        blocked = True
+
+    if not blocked:
+        raise RiskError(
+            "SELF-TEST: variável FUTURE_RETURN "
+            "não foi bloqueada."
         )
 
     return True
