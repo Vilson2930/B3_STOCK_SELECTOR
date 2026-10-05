@@ -20,7 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+
     steps:
+
       # =======================================================================
       # REPOSITÓRIO
       # =======================================================================
@@ -45,7 +49,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install -r requirements.txt
 
       # =======================================================================
       # VALIDAÇÃO DE SINTAXE
@@ -66,7 +70,7 @@ jobs:
 
       - name: Test PIT Engine
         run: |
-          python data/pit.py
+          python -m data.pit
 
       # =======================================================================
       # SELF-TEST — MARKET
@@ -74,7 +78,7 @@ jobs:
 
       - name: Test Market Engine
         run: |
-          python data/market.py
+          python -m data.market
 
       # =======================================================================
       # SELF-TEST — UNIVERSE
@@ -82,7 +86,7 @@ jobs:
 
       - name: Test Universe Engine
         run: |
-          python engines/universe.py
+          python -m engines.universe
 
       # =======================================================================
       # SELF-TEST — INVESTABILITY
@@ -90,7 +94,7 @@ jobs:
 
       - name: Test Investability Engine
         run: |
-          python engines/investability.py
+          python -m engines.investability
 
       # =======================================================================
       # SELF-TEST — FUNDAMENTALS
@@ -98,7 +102,7 @@ jobs:
 
       - name: Test Fundamentals Engine
         run: |
-          python engines/fundamentals.py
+          python -m engines.fundamentals
 
       # =======================================================================
       # SELF-TEST — QUALITY
@@ -106,17 +110,15 @@ jobs:
 
       - name: Test Quality Engine
         run: |
-          python engines/quality.py
+          python -m engines.quality
 
       # =======================================================================
       # SELF-TEST — TURNAROUND
-      #
-      # Deve continuar em RESEARCH ONLY.
       # =======================================================================
 
       - name: Test Turnaround Engine
         run: |
-          python engines/turnaround.py
+          python -m engines.turnaround
 
       # =======================================================================
       # SELF-TEST — VALUATION
@@ -124,17 +126,15 @@ jobs:
 
       - name: Test Valuation Engine
         run: |
-          python engines/valuation.py
+          python -m engines.valuation
 
       # =======================================================================
       # SELF-TEST — RANKING
-      #
-      # Deve falhar caso Turnaround Research entre no ranking.
       # =======================================================================
 
       - name: Test Ranking Engine
         run: |
-          python engines/ranking.py
+          python -m engines.ranking
 
       # =======================================================================
       # SELF-TEST — RISK
@@ -142,7 +142,7 @@ jobs:
 
       - name: Test Risk Engine
         run: |
-          python engines/risk.py
+          python -m engines.risk
 
       # =======================================================================
       # SELF-TEST — REPORT
@@ -150,10 +150,10 @@ jobs:
 
       - name: Test Report Engine
         run: |
-          python reports/report.py
+          python -m reports.report
 
       # =======================================================================
-      # CONFIGURAÇÃO GLOBAL
+      # CONFIG
       # =======================================================================
 
       - name: Validate configuration
@@ -173,21 +173,15 @@ jobs:
           PY
 
       # =======================================================================
-      # TESTE DE IMPORTAÇÃO DO PIPELINE
-      #
-      # main.py não executa carteira sem inputs PIT explícitos.
-      # Isso é intencional.
+      # MAIN
       # =======================================================================
 
       - name: Validate Main Pipeline
         run: |
-          python main.py
+          python -m main
 
       # =======================================================================
-      # AUDITORIA DE SEGURANÇA
-      #
-      # Verifica a configuração do Turnaround antes de qualquer futura
-      # execução operacional.
+      # TURNAROUND SAFETY LOCK
       # =======================================================================
 
       - name: Validate Turnaround production lock
@@ -227,12 +221,7 @@ jobs:
           PY
 
       # =======================================================================
-      # AUDITORIA DE CÓDIGO
-      #
-      # Procura termos de retorno futuro nos módulos operacionais.
-      #
-      # As ocorrências de proteção/auditoria são permitidas.
-      # O objetivo aqui é produzir visibilidade no log.
+      # AUDITORIA FUTURE RETURN
       # =======================================================================
 
       - name: Audit future-return references
@@ -254,9 +243,6 @@ jobs:
 
       # =======================================================================
       # OUTPUTS
-      #
-      # Se houver outputs gerados por testes ou por futura execução real,
-      # preserva como artifact do GitHub Actions.
       # =======================================================================
 
       - name: Upload outputs
