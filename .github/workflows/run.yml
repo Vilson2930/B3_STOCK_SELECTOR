@@ -1,0 +1,298 @@
+name: B3 Stock Selector
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Segunda a sexta, 11:00 UTC
+    - cron: "0 11 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: b3-stock-selector
+  cancel-in-progress: false
+
+jobs:
+  run-b3-selector:
+    name: Run B3 Stock Selector
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      # =======================================================================
+      # REPOSITÓRIO
+      # =======================================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # =======================================================================
+      # PYTHON
+      # =======================================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # =======================================================================
+      # DEPENDÊNCIAS
+      # =======================================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # =======================================================================
+      # VALIDAÇÃO DE SINTAXE
+      # =======================================================================
+
+      - name: Validate Python syntax
+        run: |
+          python -m compileall \
+            main.py \
+            config.py \
+            data \
+            engines \
+            reports
+
+      # =======================================================================
+      # SELF-TEST — PIT
+      # =======================================================================
+
+      - name: Test PIT Engine
+        run: |
+          python data/pit.py
+
+      # =======================================================================
+      # SELF-TEST — MARKET
+      # =======================================================================
+
+      - name: Test Market Engine
+        run: |
+          python data/market.py
+
+      # =======================================================================
+      # SELF-TEST — UNIVERSE
+      # =======================================================================
+
+      - name: Test Universe Engine
+        run: |
+          python engines/universe.py
+
+      # =======================================================================
+      # SELF-TEST — INVESTABILITY
+      # =======================================================================
+
+      - name: Test Investability Engine
+        run: |
+          python engines/investability.py
+
+      # =======================================================================
+      # SELF-TEST — FUNDAMENTALS
+      # =======================================================================
+
+      - name: Test Fundamentals Engine
+        run: |
+          python engines/fundamentals.py
+
+      # =======================================================================
+      # SELF-TEST — QUALITY
+      # =======================================================================
+
+      - name: Test Quality Engine
+        run: |
+          python engines/quality.py
+
+      # =======================================================================
+      # SELF-TEST — TURNAROUND
+      #
+      # Deve continuar em RESEARCH ONLY.
+      # =======================================================================
+
+      - name: Test Turnaround Engine
+        run: |
+          python engines/turnaround.py
+
+      # =======================================================================
+      # SELF-TEST — VALUATION
+      # =======================================================================
+
+      - name: Test Valuation Engine
+        run: |
+          python engines/valuation.py
+
+      # =======================================================================
+      # SELF-TEST — RANKING
+      #
+      # Deve falhar caso Turnaround Research entre no ranking.
+      # =======================================================================
+
+      - name: Test Ranking Engine
+        run: |
+          python engines/ranking.py
+
+      # =======================================================================
+      # SELF-TEST — RISK
+      # =======================================================================
+
+      - name: Test Risk Engine
+        run: |
+          python engines/risk.py
+
+      # =======================================================================
+      # SELF-TEST — REPORT
+      # =======================================================================
+
+      - name: Test Report Engine
+        run: |
+          python reports/report.py
+
+      # =======================================================================
+      # CONFIGURAÇÃO GLOBAL
+      # =======================================================================
+
+      - name: Validate configuration
+        run: |
+          python - <<'PY'
+          from config import validate_config
+
+          validate_config()
+
+          print("=" * 72)
+          print("CONFIG VALIDATION")
+          print("=" * 72)
+          print("Status: OK")
+          print("Look-ahead: BLOQUEADO")
+          print("Future return: BLOQUEADO")
+          print("=" * 72)
+          PY
+
+      # =======================================================================
+      # TESTE DE IMPORTAÇÃO DO PIPELINE
+      #
+      # main.py não executa carteira sem inputs PIT explícitos.
+      # Isso é intencional.
+      # =======================================================================
+
+      - name: Validate Main Pipeline
+        run: |
+          python main.py
+
+      # =======================================================================
+      # AUDITORIA DE SEGURANÇA
+      #
+      # Verifica a configuração do Turnaround antes de qualquer futura
+      # execução operacional.
+      # =======================================================================
+
+      - name: Validate Turnaround production lock
+        run: |
+          python - <<'PY'
+          from config import TURNAROUND_ENGINE
+
+          production_authorized = bool(
+              TURNAROUND_ENGINE.get(
+                  "production_authorized",
+                  False,
+              )
+          )
+
+          validated_rule = TURNAROUND_ENGINE.get(
+              "validated_rule"
+          )
+
+          if production_authorized and validated_rule is None:
+              raise RuntimeError(
+                  "FAIL-SAFE: Turnaround autorizado para produção "
+                  "sem regra validada."
+              )
+
+          print("=" * 72)
+          print("TURNAROUND SAFETY CHECK")
+          print("=" * 72)
+          print(
+              "Production authorized:",
+              production_authorized,
+          )
+          print(
+              "Validated rule:",
+              validated_rule,
+          )
+          print("=" * 72)
+          PY
+
+      # =======================================================================
+      # AUDITORIA DE CÓDIGO
+      #
+      # Procura termos de retorno futuro nos módulos operacionais.
+      #
+      # As ocorrências de proteção/auditoria são permitidas.
+      # O objetivo aqui é produzir visibilidade no log.
+      # =======================================================================
+
+      - name: Audit future-return references
+        shell: bash
+        run: |
+          echo "============================================================"
+          echo "FUTURE RETURN REFERENCE AUDIT"
+          echo "============================================================"
+
+          grep -RniE \
+            "FUTURE_RETURN|RETORNO_FUTURO|FUTURE_WINNER|WINNER_LABEL" \
+            main.py config.py data engines reports \
+            || true
+
+          echo "============================================================"
+          echo "Audit completed."
+          echo "References above must correspond only to fail-safe/audit logic."
+          echo "============================================================"
+
+      # =======================================================================
+      # OUTPUTS
+      #
+      # Se houver outputs gerados por testes ou por futura execução real,
+      # preserva como artifact do GitHub Actions.
+      # =======================================================================
+
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: b3-stock-selector-${{ github.run_number }}
+          path: |
+            outputs/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      # =======================================================================
+      # RESUMO
+      # =======================================================================
+
+      - name: Execution summary
+        if: success()
+        run: |
+          echo "## B3 STOCK SELECTOR" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Sintaxe validada" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ PIT validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Market validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Universe validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Investability validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Fundamentals validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Quality validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Turnaround Research validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Valuation validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Ranking validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Risk validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "✅ Report validado" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Turnaround:** Research Only" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Future return na execução:** NÃO" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Look-ahead:** BLOQUEADO" >> "$GITHUB_STEP_SUMMARY"
