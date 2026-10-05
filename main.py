@@ -12,9 +12,9 @@
 #      ↓
 # UNIVERSE
 #      ↓
-# INVESTABILITY
-#      ↓
 # FUNDAMENTALS
+#      ↓
+# INVESTABILITY
 #      ↓
 # ┌─────────────┬──────────────┬───────────────┐
 # │   QUALITY   │  TURNAROUND  │   VALUATION   │
@@ -836,63 +836,41 @@ def run_universe_stage(
 
 def run_investability_stage(
     issuer_universe: pd.DataFrame,
+    security_universe: pd.DataFrame,
+    fundamentals: pd.DataFrame,
     context: PITContext,
-    safety_data: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
 
     function = resolve_callable(
         investability_module,
         (
             "run_investability_engine",
-            "build_investability",
         ),
     )
-
-    attempts = [
-        (
-            (),
-            {
-                "issuer_universe": issuer_universe,
-                "safety_df": safety_data,
-                "context": context,
-            },
-        ),
-        (
-            (),
-            {
-                "issuer_universe": issuer_universe,
-                "safety_data": safety_data,
-                "context": context,
-            },
-        ),
-        (
-            (
-                issuer_universe,
-                safety_data,
-                context,
-            ),
-            {},
-        ),
-        (
-            (
-                issuer_universe,
-            ),
-            {
-                "context": context,
-            },
-        ),
-        (
-            (
-                issuer_universe,
-            ),
-            {},
-        ),
-    ]
 
     result = call_stage(
         "INVESTABILITY",
         function,
-        attempts,
+        [
+            (
+                (),
+                {
+                    "issuer_universe": issuer_universe,
+                    "security_universe": security_universe,
+                    "fundamentals": fundamentals,
+                    "context": context,
+                },
+            ),
+            (
+                (
+                    issuer_universe,
+                    security_universe,
+                    fundamentals,
+                    context,
+                ),
+                {},
+            ),
+        ],
     )
 
     require_dataframe(
@@ -906,88 +884,71 @@ def run_investability_stage(
     )
 
     return result
-
 
 # =============================================================================
 # FUNDAMENTALS
 # =============================================================================
 
 def run_fundamentals_stage(
-    investability: pd.DataFrame,
+    fundamental_base: pd.DataFrame,
     context: PITContext,
-    accounting_data: Optional[pd.DataFrame] = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
 
     function = resolve_callable(
         fundamentals_module,
         (
-            "run_fundamentals_engine",
             "build_fundamentals",
         ),
     )
 
-    attempts = [
-        (
-            (),
-            {
-                "issuer_universe": investability,
-                "accounting_data": accounting_data,
-                "context": context,
-            },
-        ),
-        (
-            (),
-            {
-                "investability": investability,
-                "accounting_data": accounting_data,
-                "context": context,
-            },
-        ),
-        (
-            (
-                investability,
-                accounting_data,
-                context,
-            ),
-            {},
-        ),
-        (
-            (
-                investability,
-                accounting_data,
-            ),
-            {
-                "context": context,
-            },
-        ),
-        (
-            (
-                investability,
-            ),
-            {
-                "context": context,
-            },
-        ),
-    ]
-
     result = call_stage(
         "FUNDAMENTALS",
         function,
-        attempts,
+        [
+            (
+                (),
+                {
+                    "fundamental_base": fundamental_base,
+                    "context": context,
+                },
+            ),
+            (
+                (
+                    fundamental_base,
+                    context,
+                ),
+                {},
+            ),
+        ],
+    )
+
+    if (
+        not isinstance(result, tuple)
+        or len(result) != 2
+    ):
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: build_fundamentals deve retornar "
+            "(fundamentals, coverage)."
+        )
+
+    fundamentals, coverage = result
+
+    require_dataframe(
+        fundamentals,
+        "FUNDAMENTALS",
     )
 
     require_dataframe(
-        result,
-        "FUNDAMENTALS",
+        coverage,
+        "FUNDAMENTAL_COVERAGE",
     )
 
     assert_no_future_information(
-        result,
+        fundamentals,
         "FUNDAMENTALS",
     )
 
-    return result
-
+    return fundamentals, coverage
 
 # =============================================================================
 # QUALITY
@@ -1559,30 +1520,33 @@ def run_pipeline(
     )
 
     # -------------------------------------------------------------------------
+    # FUNDAMENTALS
+    #
+    # O Fundamental Engine transforma a base contábil PIT em indicadores.
+    # Ele precisa existir ANTES do Investability Gate, pois o gate valida
+    # cobertura fundamental mínima por emissor.
+    # -------------------------------------------------------------------------
+
+    fundamentals, fundamental_coverage = (
+        run_fundamentals_stage(
+            fundamental_base=accounting_data,
+            context=context,
+        )
+    )
+
+    # -------------------------------------------------------------------------
     # INVESTABILITY
+    #
+    # Assinatura oficial do engine:
+    # issuer_universe + security_universe + fundamentals + context.
     # -------------------------------------------------------------------------
 
     investability = (
         run_investability_stage(
             issuer_universe=issuer_universe,
+            security_universe=security_universe,
+            fundamentals=fundamentals,
             context=context,
-            safety_data=(
-                safety_data
-                if safety_data is not None
-                else accounting_data
-            ),
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # FUNDAMENTALS
-    # -------------------------------------------------------------------------
-
-    fundamentals = (
-        run_fundamentals_stage(
-            investability=investability,
-            context=context,
-            accounting_data=accounting_data,
         )
     )
 
@@ -1711,16 +1675,43 @@ def run_pipeline(
         context,
     )
 
-    stage_files[
-        "fundamentals"
-    ] = save_stage_if_supported(
+    save_fundamentals_function = resolve_callable(
         fundamentals_module,
         (
             "save_fundamentals",
         ),
-        fundamentals,
-        context,
+        required=False,
     )
+
+    if save_fundamentals_function is not None:
+        stage_files[
+            "fundamentals"
+        ] = call_stage(
+            "FUNDAMENTALS_SAVE",
+            save_fundamentals_function,
+            [
+                (
+                    (
+                        fundamentals,
+                        fundamental_coverage,
+                        context,
+                    ),
+                    {},
+                ),
+                (
+                    (),
+                    {
+                        "fundamentals": fundamentals,
+                        "coverage": fundamental_coverage,
+                        "context": context,
+                    },
+                ),
+            ],
+        )
+    else:
+        stage_files[
+            "fundamentals"
+        ] = None
 
     stage_files[
         "quality"
@@ -1860,6 +1851,9 @@ def run_pipeline(
 
         "fundamentals":
             fundamentals,
+
+        "fundamental_coverage":
+            fundamental_coverage,
 
         "quality":
             quality,
@@ -2156,7 +2150,7 @@ if __name__ == "__main__":
         print()
         print(
             "Pipeline: PIT → MARKET → ACCOUNTING → UNIVERSE → "
-            "INVESTABILITY → FUNDAMENTALS → QUALITY / TURNAROUND / "
+            "FUNDAMENTALS → INVESTABILITY → QUALITY / TURNAROUND / "
             "VALUATION → RANKING → RISK → REPORT"
         )
         print()
@@ -2205,7 +2199,7 @@ if __name__ == "__main__":
         )
 
         accounting_cutoff = (
-            quarter_start - pd.Timedelta(days=1)
+            quarter_start - pd.offsets.Day(1)
         ).normalize()
 
     if accounting_cutoff > formation_date:
