@@ -121,6 +121,19 @@ except ImportError as exc:
 
 
 # =============================================================================
+# ACCOUNTING
+# =============================================================================
+
+try:
+    import data.accounting as accounting_module
+
+except ImportError as exc:
+    raise RuntimeError(
+        "FAIL-SAFE: não foi possível importar data/accounting.py."
+    ) from exc
+
+
+# =============================================================================
 # UNIVERSE
 # =============================================================================
 
@@ -1342,7 +1355,7 @@ def run_pipeline(
     formation_date,
     accounting_cutoff,
     market_cutoff=None,
-    identity_map: pd.DataFrame,
+    identity_map: Optional[pd.DataFrame] = None,
     accounting_data: Optional[pd.DataFrame] = None,
     safety_data: Optional[pd.DataFrame] = None,
 ) -> dict:
@@ -1373,19 +1386,81 @@ def run_pipeline(
         pass
 
     # -------------------------------------------------------------------------
-    # INPUT IDENTITY
-    # -------------------------------------------------------------------------
-
-    identity = resolve_identity_map(
-        identity_map
-    )
-
-    # -------------------------------------------------------------------------
     # MARKET
     # -------------------------------------------------------------------------
 
     market_universe = run_market_stage(
         context
+    )
+
+    # -------------------------------------------------------------------------
+    # ACCOUNTING / IDENTITY
+    #
+    # Em produção, quando as bases não forem fornecidas externamente,
+    # constrói automaticamente a ponte ticker → emissor e a base contábil
+    # oficial CVM respeitando o contexto PIT.
+    # -------------------------------------------------------------------------
+
+    if identity_map is None or accounting_data is None:
+
+        build_production_accounting = resolve_callable(
+            accounting_module,
+            (
+                "build_production_accounting",
+            ),
+        )
+
+        market_tickers = (
+            market_universe["TICKER"]
+            .dropna()
+            .astype(str)
+            .str.upper()
+            .unique()
+            .tolist()
+        )
+
+        generated_identity, generated_accounting = call_stage(
+            "ACCOUNTING",
+            build_production_accounting,
+            [
+                (
+                    (),
+                    {
+                        "formation_date": context.formation_date,
+                        "accounting_cutoff": context.accounting_cutoff,
+                        "market_tickers": market_tickers,
+                    },
+                ),
+                (
+                    (
+                        context.formation_date,
+                        context.accounting_cutoff,
+                    ),
+                    {
+                        "market_tickers": market_tickers,
+                    },
+                ),
+            ],
+        )
+
+        if identity_map is None:
+            identity_map = generated_identity
+
+        if accounting_data is None:
+            accounting_data = generated_accounting
+
+    identity = resolve_identity_map(
+        identity_map
+    )
+
+    require_dataframe(
+        accounting_data,
+        "ACCOUNTING_DATA",
+    )
+
+    assert_no_future_information(
+        accounting_data,
+        "ACCOUNTING_DATA",
     )
 
     # -------------------------------------------------------------------------
@@ -1418,7 +1493,11 @@ def run_pipeline(
         run_investability_stage(
             issuer_universe=issuer_universe,
             context=context,
-            safety_data=safety_data,
+            safety_data=(
+                safety_data
+                if safety_data is not None
+                else accounting_data
+            ),
         )
     )
 
@@ -1952,47 +2031,136 @@ def print_run_summary(
 
 if __name__ == "__main__":
 
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "B3 STOCK SELECTOR — execução segura do pipeline."
+        )
+    )
+
+    parser.add_argument(
+        "--run",
+        action="store_true",
+        help="Executa o pipeline real de produção.",
+    )
+
+    parser.add_argument(
+        "--formation-date",
+        default=None,
+        help="Data de formação YYYY-MM-DD. Padrão: data UTC da execução.",
+    )
+
+    parser.add_argument(
+        "--accounting-cutoff",
+        default=None,
+        help=(
+            "Cutoff contábil YYYY-MM-DD. "
+            "Se omitido, usa o último trimestre civil encerrado "
+            "com defasagem conservadora de divulgação."
+        ),
+    )
+
+    parser.add_argument(
+        "--market-cutoff",
+        default=None,
+        help="Cutoff de mercado YYYY-MM-DD. Padrão: formation-date.",
+    )
+
+    args = parser.parse_args()
+
     print("=" * 78)
     print(f"{PROJECT_NAME} — MAIN")
     print("=" * 78)
 
-    print(
-        "Orquestrador carregado com sucesso."
+    if not args.run:
+        print("Orquestrador carregado com sucesso.")
+        print()
+        print(
+            "Execução real requer --run. "
+            "Nenhum dado de produção foi processado."
+        )
+        print()
+        print(
+            "Pipeline: PIT → MARKET → ACCOUNTING → UNIVERSE → "
+            "INVESTABILITY → FUNDAMENTALS → QUALITY / TURNAROUND / "
+            "VALUATION → RANKING → RISK → REPORT"
+        )
+        print()
+        print("Turnaround Research: BLOQUEADO NO RANKING")
+        print("Retorno futuro: PROIBIDO")
+        print("Look-ahead: PROIBIDO")
+        print("=" * 78)
+        sys.exit(0)
+
+    # -------------------------------------------------------------------------
+    # DATAS DE PRODUÇÃO
+    # -------------------------------------------------------------------------
+
+    formation_date = (
+        pd.Timestamp(args.formation_date).normalize()
+        if args.formation_date
+        else pd.Timestamp.now(tz="UTC").tz_localize(None).normalize()
     )
 
-    print()
-    print(
-        "Execução automática sem parâmetros foi bloqueada "
-        "por segurança."
+    market_cutoff = (
+        pd.Timestamp(args.market_cutoff).normalize()
+        if args.market_cutoff
+        else formation_date
     )
 
-    print()
-    print(
-        "Use run_pipeline_safe(...) com contexto PIT "
-        "e bases explicitamente definidas."
-    )
+    if args.accounting_cutoff:
 
-    print()
-    print(
-        "Pipeline:"
-    )
+        accounting_cutoff = (
+            pd.Timestamp(args.accounting_cutoff)
+            .normalize()
+        )
 
-    print(
-        "PIT → MARKET → UNIVERSE → INVESTABILITY → FUNDAMENTALS "
-        "→ QUALITY / TURNAROUND / VALUATION → RANKING → RISK → REPORT"
-    )
+    else:
+        # Regra conservadora e determinística:
+        # usa o trimestre encerrado anterior ao trimestre corrente.
+        # Isso evita presumir que demonstrações do trimestre recém-encerrado
+        # já estejam publicadas no momento da execução.
+        quarter_start_month = (
+            ((formation_date.month - 1) // 3) * 3 + 1
+        )
 
-    print()
-    print(
-        "Turnaround Research: BLOQUEADO NO RANKING"
-    )
+        quarter_start = pd.Timestamp(
+            year=formation_date.year,
+            month=quarter_start_month,
+            day=1,
+        )
 
-    print(
-        "Retorno futuro: PROIBIDO"
-    )
+        accounting_cutoff = (
+            quarter_start - pd.Timedelta(days=1)
+        ).normalize()
 
-    print(
-        "Look-ahead: PROIBIDO"
-    )
+    if accounting_cutoff > formation_date:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: accounting_cutoff posterior à formation_date."
+        )
 
+    if market_cutoff > formation_date:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: market_cutoff posterior à formation_date."
+        )
+
+    print("Modo: PRODUÇÃO")
+    print("Formation date:", formation_date.date())
+    print("Accounting cutoff:", accounting_cutoff.date())
+    print("Market cutoff:", market_cutoff.date())
     print("=" * 78)
+
+    result = run_pipeline_safe(
+        formation_date=formation_date,
+        accounting_cutoff=accounting_cutoff,
+        market_cutoff=market_cutoff,
+        identity_map=None,
+        accounting_data=None,
+        safety_data=None,
+    )
+
+    print_run_summary(
+        result
+    )
+
