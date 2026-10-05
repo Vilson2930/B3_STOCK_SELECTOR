@@ -648,6 +648,598 @@ def _read_statement_files(
 
 
 # =============================================================================
+# DFP / ITR — COMPOSIÇÃO DO CAPITAL
+# =============================================================================
+
+def _find_capital_composition_file(
+    dataset: str,
+    year: int,
+) -> Optional[str]:
+    """
+    Localiza, dentro do ZIP oficial DFP/ITR, o CSV da seção
+    Dados da Empresa / Composição do Capital.
+
+    A identificação é deliberadamente conservadora:
+    - aceita apenas arquivos cujo nome contenha COMPOSICAO e CAPITAL;
+    - exige identificação única;
+    - retorna None quando a seção não existir no ano/dataset.
+    """
+    files = list_zip_files(
+        dataset,
+        int(year),
+    )
+
+    candidates = []
+
+    for filename in files:
+        normalized = _normalize_text(
+            Path(filename).name
+        )
+
+        if (
+            "COMPOSICAO" in normalized
+            and "CAPITAL" in normalized
+            and normalized.endswith(".CSV")
+        ):
+            candidates.append(filename)
+
+    candidates = sorted(
+        set(candidates)
+    )
+
+    if not candidates:
+        return None
+
+    if len(candidates) != 1:
+        raise AccountingDataError(
+            "FAIL-SAFE: arquivo de Composição do Capital "
+            f"não identificado de forma única em {dataset}/{year}. "
+            f"Encontrados: {candidates}"
+        )
+
+    return candidates[0]
+
+
+def _read_capital_composition(
+    dataset: str,
+    year: int,
+    context: AccountingContext,
+) -> pd.DataFrame:
+    """
+    Lê e normaliza a Composição do Capital oficial da CVM.
+
+    Saída canônica por observação:
+        ISSUER_ID
+        CAPITAL_REFERENCE_DATE
+        SHARES_ON_ISSUED
+        SHARES_PN_ISSUED
+        SHARES_TOTAL_ISSUED
+        SHARES_ON_TREASURY
+        SHARES_PN_TREASURY
+        SHARES_TOTAL_TREASURY
+        SHARES_ON_OUTSTANDING
+        SHARES_PN_OUTSTANDING
+        SHARES_OUTSTANDING
+        CAPITAL_SOURCE_DATASET
+        CAPITAL_SOURCE_YEAR
+        CAPITAL_SOURCE_FILE
+
+    "Outstanding" é calculado como ações integralizadas/emitidas
+    menos ações mantidas em tesouraria. Ausência de informação
+    não é transformada silenciosamente em zero, salvo quando o
+    total pode ser reconstruído de ON + PN.
+    """
+    filename = _find_capital_composition_file(
+        dataset,
+        int(year),
+    )
+
+    if filename is None:
+        return pd.DataFrame()
+
+    raw = read_csv_from_zip(
+        dataset,
+        int(year),
+        filename,
+    )
+
+    raw = _normalize_columns(
+        raw
+    )
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    cnpj_col = _find_column(
+        raw,
+        (
+            "CNPJ_CIA",
+            "CNPJ_COMPANHIA",
+            "CNPJ",
+        ),
+        required=False,
+    )
+
+    cvm_col = _find_column(
+        raw,
+        (
+            "CD_CVM",
+            "CODIGO_CVM",
+        ),
+        required=False,
+    )
+
+    if cnpj_col is None and cvm_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: Composição do Capital sem "
+            "identificador de emissor."
+        )
+
+    reference_col = _find_column(
+        raw,
+        (
+            "DT_REFER",
+            "DATA_REFERENCIA",
+        ),
+    )
+
+    version_col = _find_column(
+        raw,
+        (
+            "VERSAO",
+            "VERSAO_DOCUMENTO",
+        ),
+        required=False,
+    )
+
+    on_issued_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_ORDIN_CAP_INTEGR",
+            "QT_ACAO_ORDINARIA_CAP_INTEGR",
+            "QT_ACOES_ORDINARIAS_CAPITAL_INTEGRALIZADO",
+        ),
+        required=False,
+    )
+
+    pn_issued_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_PREF_CAP_INTEGR",
+            "QT_ACAO_PREFERENCIAL_CAP_INTEGR",
+            "QT_ACOES_PREFERENCIAIS_CAPITAL_INTEGRALIZADO",
+        ),
+        required=False,
+    )
+
+    total_issued_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_TOTAL_CAP_INTEGR",
+            "QT_ACOES_TOTAL_CAPITAL_INTEGRALIZADO",
+        ),
+        required=False,
+    )
+
+    on_treasury_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_ORDIN_TESOURO",
+            "QT_ACAO_ORDINARIA_TESOURO",
+            "QT_ACOES_ORDINARIAS_TESOURARIA",
+        ),
+        required=False,
+    )
+
+    pn_treasury_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_PREF_TESOURO",
+            "QT_ACAO_PREFERENCIAL_TESOURO",
+            "QT_ACOES_PREFERENCIAIS_TESOURARIA",
+        ),
+        required=False,
+    )
+
+    total_treasury_col = _find_column(
+        raw,
+        (
+            "QT_ACAO_TOTAL_TESOURO",
+            "QT_ACOES_TOTAL_TESOURARIA",
+        ),
+        required=False,
+    )
+
+    if (
+        on_issued_col is None
+        and pn_issued_col is None
+        and total_issued_col is None
+    ):
+        raise AccountingDataError(
+            "FAIL-SAFE: Composição do Capital localizada, "
+            "mas nenhuma coluna de quantidade de ações "
+            "foi reconhecida. Colunas disponíveis: "
+            f"{sorted(raw.columns.tolist())}"
+        )
+
+    result = pd.DataFrame(
+        index=raw.index
+    )
+
+    if cnpj_col is not None:
+        result["ISSUER_ID"] = (
+            raw[cnpj_col]
+            .map(_cnpj)
+        )
+    else:
+        result["ISSUER_ID"] = (
+            raw[cvm_col]
+            .map(_issuer_id)
+        )
+
+    result[
+        "CAPITAL_REFERENCE_DATE"
+    ] = _parse_dates(
+        raw[reference_col]
+    )
+
+    if version_col is not None:
+        result[
+            "CAPITAL_VERSION"
+        ] = pd.to_numeric(
+            raw[version_col],
+            errors="coerce",
+        )
+    else:
+        result[
+            "CAPITAL_VERSION"
+        ] = np.nan
+
+    def numeric_or_nan(
+        column: Optional[str],
+    ) -> pd.Series:
+        if column is None:
+            return pd.Series(
+                np.nan,
+                index=raw.index,
+                dtype="float64",
+            )
+
+        return _numeric(
+            raw[column]
+        )
+
+    result[
+        "SHARES_ON_ISSUED"
+    ] = numeric_or_nan(
+        on_issued_col
+    )
+
+    result[
+        "SHARES_PN_ISSUED"
+    ] = numeric_or_nan(
+        pn_issued_col
+    )
+
+    result[
+        "SHARES_TOTAL_ISSUED"
+    ] = numeric_or_nan(
+        total_issued_col
+    )
+
+    result[
+        "SHARES_ON_TREASURY"
+    ] = numeric_or_nan(
+        on_treasury_col
+    )
+
+    result[
+        "SHARES_PN_TREASURY"
+    ] = numeric_or_nan(
+        pn_treasury_col
+    )
+
+    result[
+        "SHARES_TOTAL_TREASURY"
+    ] = numeric_or_nan(
+        total_treasury_col
+    )
+
+    # Reconstruções apenas quando matematicamente determinadas.
+    missing_total_issued = (
+        result[
+            "SHARES_TOTAL_ISSUED"
+        ].isna()
+        & result[
+            "SHARES_ON_ISSUED"
+        ].notna()
+        & result[
+            "SHARES_PN_ISSUED"
+        ].notna()
+    )
+
+    result.loc[
+        missing_total_issued,
+        "SHARES_TOTAL_ISSUED",
+    ] = (
+        result.loc[
+            missing_total_issued,
+            "SHARES_ON_ISSUED",
+        ]
+        + result.loc[
+            missing_total_issued,
+            "SHARES_PN_ISSUED",
+        ]
+    )
+
+    missing_total_treasury = (
+        result[
+            "SHARES_TOTAL_TREASURY"
+        ].isna()
+        & result[
+            "SHARES_ON_TREASURY"
+        ].notna()
+        & result[
+            "SHARES_PN_TREASURY"
+        ].notna()
+    )
+
+    result.loc[
+        missing_total_treasury,
+        "SHARES_TOTAL_TREASURY",
+    ] = (
+        result.loc[
+            missing_total_treasury,
+            "SHARES_ON_TREASURY",
+        ]
+        + result.loc[
+            missing_total_treasury,
+            "SHARES_PN_TREASURY",
+        ]
+    )
+
+    def outstanding(
+        issued: pd.Series,
+        treasury: pd.Series,
+    ) -> pd.Series:
+        value = issued.copy()
+
+        both_known = (
+            issued.notna()
+            & treasury.notna()
+        )
+
+        value.loc[
+            both_known
+        ] = (
+            issued.loc[both_known]
+            - treasury.loc[both_known]
+        )
+
+        # Se tesouraria estiver ausente, não presumimos zero.
+        value.loc[
+            issued.notna()
+            & treasury.isna()
+        ] = np.nan
+
+        value.loc[
+            issued.isna()
+        ] = np.nan
+
+        return value
+
+    result[
+        "SHARES_ON_OUTSTANDING"
+    ] = outstanding(
+        result["SHARES_ON_ISSUED"],
+        result["SHARES_ON_TREASURY"],
+    )
+
+    result[
+        "SHARES_PN_OUTSTANDING"
+    ] = outstanding(
+        result["SHARES_PN_ISSUED"],
+        result["SHARES_PN_TREASURY"],
+    )
+
+    result[
+        "SHARES_OUTSTANDING"
+    ] = outstanding(
+        result["SHARES_TOTAL_ISSUED"],
+        result["SHARES_TOTAL_TREASURY"],
+    )
+
+    # Quando o total outstanding não puder ser obtido diretamente,
+    # ON + PN pode reconstruí-lo de forma exata.
+    reconstruct_outstanding = (
+        result[
+            "SHARES_OUTSTANDING"
+        ].isna()
+        & result[
+            "SHARES_ON_OUTSTANDING"
+        ].notna()
+        & result[
+            "SHARES_PN_OUTSTANDING"
+        ].notna()
+    )
+
+    result.loc[
+        reconstruct_outstanding,
+        "SHARES_OUTSTANDING",
+    ] = (
+        result.loc[
+            reconstruct_outstanding,
+            "SHARES_ON_OUTSTANDING",
+        ]
+        + result.loc[
+            reconstruct_outstanding,
+            "SHARES_PN_OUTSTANDING",
+        ]
+    )
+
+    result[
+        "CAPITAL_SOURCE_DATASET"
+    ] = dataset
+
+    result[
+        "CAPITAL_SOURCE_YEAR"
+    ] = int(year)
+
+    result[
+        "CAPITAL_SOURCE_FILE"
+    ] = filename
+
+    result = result.loc[
+        result["ISSUER_ID"].notna()
+        & result[
+            "CAPITAL_REFERENCE_DATE"
+        ].notna()
+    ].copy()
+
+    # PIT por data de referência. A limitação de disponibilidade/publicação
+    # histórica permanece explícita no projeto: o ZIP anual é reapresentável.
+    result = result.loc[
+        result[
+            "CAPITAL_REFERENCE_DATE"
+        ]
+        <= context.accounting_cutoff
+    ].copy()
+
+    if result.empty:
+        return result
+
+    numeric_share_columns = (
+        "SHARES_ON_ISSUED",
+        "SHARES_PN_ISSUED",
+        "SHARES_TOTAL_ISSUED",
+        "SHARES_ON_TREASURY",
+        "SHARES_PN_TREASURY",
+        "SHARES_TOTAL_TREASURY",
+        "SHARES_ON_OUTSTANDING",
+        "SHARES_PN_OUTSTANDING",
+        "SHARES_OUTSTANDING",
+    )
+
+    for column in numeric_share_columns:
+        invalid = (
+            result[column].notna()
+            & (result[column] < 0)
+        )
+
+        if invalid.any():
+            raise AccountingDataError(
+                "FAIL-SAFE: quantidade negativa de ações "
+                f"em {dataset}/{year}, coluna {column}."
+            )
+
+    result = result.sort_values(
+        [
+            "ISSUER_ID",
+            "CAPITAL_REFERENCE_DATE",
+            "CAPITAL_VERSION",
+        ],
+        na_position="first",
+    )
+
+    result = result.drop_duplicates(
+        subset=["ISSUER_ID"],
+        keep="last",
+    )
+
+    assert_no_future_information(
+        result,
+        stage=(
+            f"{dataset} capital composition"
+        ),
+    )
+
+    return result.reset_index(
+        drop=True
+    )
+
+
+def _build_capital_composition(
+    context: AccountingContext,
+) -> pd.DataFrame:
+    """
+    Monta o snapshot PIT de capital.
+
+    Prioridade:
+    1. ITR do ano do cutoff;
+    2. DFP do ano anterior como fallback.
+
+    Para o mesmo emissor, vence a observação com data de referência
+    mais recente; em empate, ITR recebe prioridade sobre DFP.
+    """
+    current_year = int(
+        context.accounting_cutoff.year
+    )
+
+    frames = []
+
+    itr = _read_capital_composition(
+        "ITR",
+        current_year,
+        context,
+    )
+
+    if not itr.empty:
+        itr = itr.copy()
+        itr[
+            "_CAPITAL_SOURCE_PRIORITY"
+        ] = 2
+        frames.append(itr)
+
+    dfp = _read_capital_composition(
+        "DFP",
+        current_year - 1,
+        context,
+    )
+
+    if not dfp.empty:
+        dfp = dfp.copy()
+        dfp[
+            "_CAPITAL_SOURCE_PRIORITY"
+        ] = 1
+        frames.append(dfp)
+
+    if not frames:
+        return pd.DataFrame()
+
+    result = pd.concat(
+        frames,
+        ignore_index=True,
+        sort=False,
+    )
+
+    result = result.sort_values(
+        [
+            "ISSUER_ID",
+            "CAPITAL_REFERENCE_DATE",
+            "_CAPITAL_SOURCE_PRIORITY",
+            "CAPITAL_VERSION",
+        ],
+        na_position="first",
+    )
+
+    result = result.drop_duplicates(
+        subset=["ISSUER_ID"],
+        keep="last",
+    )
+
+    result = result.drop(
+        columns=[
+            "_CAPITAL_SOURCE_PRIORITY",
+        ],
+        errors="ignore",
+    )
+
+    return result.reset_index(
+        drop=True
+    )
+
+
+# =============================================================================
 # FCA — IDENTIDADE TICKER → EMISSOR
 # =============================================================================
 
@@ -1530,14 +2122,52 @@ def build_accounting_data(
                     .tolist()
                 )
 
-    issuers = sorted(
-        set(issuer_sets)
+    accounting_issuers = set(
+        issuer_sets
     )
+
+    # Em produção, quando existe identity_map filtrado pelos tickers
+    # efetivamente negociáveis do Market Engine, a base contábil deve
+    # permanecer no mesmo universo econômico. Isso impede que emissores
+    # presentes nos ZIPs CVM, mas ausentes do universo B3 formado,
+    # avancem para Fundamentals/Quality/Valuation/Ranking.
+    if identity_map is not None:
+
+        identity_for_scope = (
+            identity_map.copy()
+        )
+
+        if "ISSUER_ID" not in identity_for_scope.columns:
+            raise AccountingIdentityError(
+                "FAIL-SAFE: identity_map sem ISSUER_ID "
+                "para restringir a base contábil."
+            )
+
+        market_issuers = {
+            _issuer_id(value)
+            for value in identity_for_scope[
+                "ISSUER_ID"
+            ]
+            .dropna()
+            .tolist()
+        }
+
+        market_issuers.discard(None)
+
+        issuers = sorted(
+            accounting_issuers
+            & market_issuers
+        )
+
+    else:
+        issuers = sorted(
+            accounting_issuers
+        )
 
     if not issuers:
         raise AccountingDataError(
             "FAIL-SAFE: nenhum emissor "
-            "contábil encontrado."
+            "contábil encontrado no universo elegível."
         )
 
     base = pd.DataFrame(
@@ -1666,6 +2296,61 @@ def build_accounting_data(
         how="left",
         validate="one_to_one",
     )
+
+    # -------------------------------------------------------------------------
+    # COMPOSIÇÃO DO CAPITAL
+    # -------------------------------------------------------------------------
+
+    capital = _build_capital_composition(
+        context
+    )
+
+    if not capital.empty:
+
+        capital_columns = [
+            column
+            for column in (
+                "ISSUER_ID",
+                "CAPITAL_REFERENCE_DATE",
+                "CAPITAL_VERSION",
+                "SHARES_ON_ISSUED",
+                "SHARES_PN_ISSUED",
+                "SHARES_TOTAL_ISSUED",
+                "SHARES_ON_TREASURY",
+                "SHARES_PN_TREASURY",
+                "SHARES_TOTAL_TREASURY",
+                "SHARES_ON_OUTSTANDING",
+                "SHARES_PN_OUTSTANDING",
+                "SHARES_OUTSTANDING",
+                "CAPITAL_SOURCE_DATASET",
+                "CAPITAL_SOURCE_YEAR",
+                "CAPITAL_SOURCE_FILE",
+            )
+            if column in capital.columns
+        ]
+
+        base = base.merge(
+            capital[
+                capital_columns
+            ],
+            on="ISSUER_ID",
+            how="left",
+            validate="one_to_one",
+        )
+
+    else:
+        # Ausência da seção não é convertida em quantidade artificial.
+        base[
+            "SHARES_ON_OUTSTANDING"
+        ] = np.nan
+
+        base[
+            "SHARES_PN_OUTSTANDING"
+        ] = np.nan
+
+        base[
+            "SHARES_OUTSTANDING"
+        ] = np.nan
 
     # -------------------------------------------------------------------------
     # IDENTIDADE
