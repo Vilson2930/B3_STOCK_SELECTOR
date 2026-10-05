@@ -92,8 +92,6 @@ class ValuationIntegrityError(ValuationError):
 # =============================================================================
 # MÚLTIPLOS
 #
-# Todos os múltiplos abaixo seguem:
-#
 # LOW = menor múltiplo válido recebe melhor percentil de valuation.
 #
 # Nenhum peso foi otimizado com retorno futuro.
@@ -197,10 +195,18 @@ def assert_no_future_return(
         "FUTURE_WINNER",
     )
 
+    # -------------------------------------------------------------------------
+    # COLUNAS DE AUDITORIA PERMITIDAS
+    #
+    # Estas colunas NÃO contêm retorno futuro.
+    # Elas apenas registram explicitamente que retorno futuro não foi usado.
+    # -------------------------------------------------------------------------
+
     allowed = {
         "FUTURE_RETURN_USED",
         "FUTURE_RETURN_USED_QUALITY",
         "FUTURE_RETURN_USED_TURNAROUND",
+        "FUTURE_RETURN_USED_VALUATION",
     }
 
     forbidden = []
@@ -213,12 +219,44 @@ def assert_no_future_return(
         )
 
         if normalized in allowed:
+
+            values = (
+                df[column]
+                .dropna()
+            )
+
+            if not values.empty:
+
+                normalized_values = (
+                    values
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                invalid_values = (
+                    ~normalized_values.isin(
+                        {
+                            "FALSE",
+                            "0",
+                        }
+                    )
+                )
+
+                if invalid_values.any():
+
+                    raise ValuationIntegrityError(
+                        "FAIL-SAFE: coluna de auditoria "
+                        f"{column} indica possível uso de retorno futuro."
+                    )
+
             continue
 
         if any(
             term in normalized
             for term in forbidden_terms
         ):
+
             forbidden.append(
                 column
             )
@@ -847,7 +885,7 @@ def run_valuation_engine(
 
     result[
         "VALUATION_ENGINE_VERSION"
-    ] = "0.1.0"
+    ] = "0.1.1"
 
     result[
         "FORMATION_DATE_VALUATION"
@@ -1219,6 +1257,40 @@ def _self_test():
             "SELF-TEST: retorno futuro utilizado."
         )
 
+    # -------------------------------------------------------------------------
+    # TESTE FAIL-SAFE:
+    # retorno futuro REAL deve continuar bloqueado.
+    # -------------------------------------------------------------------------
+
+    contaminated = sample.copy()
+
+    contaminated[
+        "FUTURE_RETURN"
+    ] = [
+        1.0,
+        2.0,
+        3.0,
+    ]
+
+    future_blocked = False
+
+    try:
+
+        run_valuation_engine(
+            contaminated,
+            FakeContext(),
+        )
+
+    except ValuationIntegrityError:
+
+        future_blocked = True
+
+    if not future_blocked:
+
+        raise ValuationError(
+            "SELF-TEST: retorno futuro real não foi bloqueado."
+        )
+
     return True
 
 
@@ -1245,6 +1317,6 @@ if __name__ == "__main__":
     print("Quality: INDEPENDENTE")
     print("Turnaround: INDEPENDENTE")
     print("Retorno futuro: NÃO UTILIZADO")
+    print("Fail-safe de retorno futuro: OK")
     print("Ranking final: NÃO EXECUTADO")
-
     print("=" * 72)
