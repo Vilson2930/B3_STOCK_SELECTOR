@@ -221,6 +221,18 @@ def assert_no_future_return(
         "WINNER_LABEL",
     )
 
+    # -------------------------------------------------------------------------
+    # COLUNAS DE AUDITORIA PERMITIDAS
+    #
+    # Elas NÃO contêm retorno futuro.
+    # Apenas registram explicitamente que retorno futuro NÃO foi utilizado.
+    # -------------------------------------------------------------------------
+
+    allowed_audit_columns = {
+        "FUTURE_RETURN_USED",
+        "FUTURE_RETURN_USED_QUALITY",
+    }
+
     forbidden = []
 
     for column in df.columns:
@@ -230,13 +242,44 @@ def assert_no_future_return(
             .upper()
         )
 
+        if normalized in allowed_audit_columns:
+
+            values = (
+                df[column]
+                .dropna()
+            )
+
+            if not values.empty:
+
+                normalized_values = (
+                    values
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                invalid_values = (
+                    ~normalized_values.isin(
+                        {
+                            "FALSE",
+                            "0",
+                        }
+                    )
+                )
+
+                if invalid_values.any():
+
+                    raise QualityIntegrityError(
+                        "FAIL-SAFE: coluna de auditoria "
+                        f"{column} indica possível uso de retorno futuro."
+                    )
+
+            continue
+
         if any(
             term in normalized
             for term in forbidden_terms
         ):
-
-            if normalized == "FUTURE_RETURN_USED":
-                continue
 
             forbidden.append(
                 column
@@ -455,10 +498,6 @@ def calculate_factor_scores(
             score_column
         )
 
-    # -------------------------------------------------------------------------
-    # COBERTURA
-    # -------------------------------------------------------------------------
-
     result[
         "QUALITY_FACTOR_AVAILABLE"
     ] = (
@@ -488,10 +527,6 @@ def calculate_factor_scores(
             "QUALITY_FACTOR_REQUIRED"
         ]
     )
-
-    # -------------------------------------------------------------------------
-    # MÉDIA SOMENTE DOS FATORES DISPONÍVEIS
-    # -------------------------------------------------------------------------
 
     result[
         "QUALITY_CONTINUOUS_SCORE"
@@ -693,10 +728,6 @@ def calculate_quality_score(
         errors="coerce",
     )
 
-    # -------------------------------------------------------------------------
-    # SCORE SOMENTE QUANDO EXISTEM AS DUAS CAMADAS
-    # -------------------------------------------------------------------------
-
     valid = (
         continuous.notna()
         &
@@ -736,10 +767,6 @@ def calculate_quality_score(
         )
     )
 
-    # -------------------------------------------------------------------------
-    # COBERTURA GERAL
-    # -------------------------------------------------------------------------
-
     result[
         "QUALITY_DATA_COVERAGE"
     ] = (
@@ -754,10 +781,6 @@ def calculate_quality_score(
         )
         / 2.0
     )
-
-    # -------------------------------------------------------------------------
-    # STATUS
-    # -------------------------------------------------------------------------
 
     result[
         "QUALITY_SCORE_VALID"
@@ -812,13 +835,9 @@ def run_quality_engine(
         result
     )
 
-    # -------------------------------------------------------------------------
-    # METADADOS
-    # -------------------------------------------------------------------------
-
     result[
         "QUALITY_ENGINE_VERSION"
-    ] = "0.1.0"
+    ] = "0.1.1"
 
     result[
         "QUALITY_ENGINE_STATUS"
@@ -838,13 +857,6 @@ def run_quality_engine(
     result[
         "FUTURE_RETURN_USED_QUALITY"
     ] = False
-
-    # -------------------------------------------------------------------------
-    # RANKING INTERNO
-    #
-    # Serve apenas para auditoria da camada Quality.
-    # NÃO é ranking final de compra.
-    # -------------------------------------------------------------------------
 
     result[
         "QUALITY_RANK"
@@ -1225,6 +1237,57 @@ def _self_test():
             "SELF-TEST: score acima de 1."
         )
 
+    # -------------------------------------------------------------------------
+    # TESTE DO FAIL-SAFE:
+    # coluna de auditoria False deve ser permitida.
+    # -------------------------------------------------------------------------
+
+    if not (
+        result[
+            "FUTURE_RETURN_USED_QUALITY"
+        ]
+        .eq(False)
+        .all()
+    ):
+
+        raise QualityError(
+            "SELF-TEST: auditoria de retorno futuro inválida."
+        )
+
+    # -------------------------------------------------------------------------
+    # TESTE DO FAIL-SAFE:
+    # variável futura real deve continuar proibida.
+    # -------------------------------------------------------------------------
+
+    contaminated = sample.copy()
+
+    contaminated[
+        "FUTURE_RETURN"
+    ] = [
+        1.0,
+        2.0,
+        3.0,
+    ]
+
+    future_blocked = False
+
+    try:
+
+        run_quality_engine(
+            contaminated,
+            FakeContext(),
+        )
+
+    except QualityIntegrityError:
+
+        future_blocked = True
+
+    if not future_blocked:
+
+        raise QualityError(
+            "SELF-TEST: retorno futuro real não foi bloqueado."
+        )
+
     return True
 
 
@@ -1244,6 +1307,7 @@ if __name__ == "__main__":
     print("Quality e Turnaround: SEPARADOS")
     print("Pesos ajustados por retorno futuro: NÃO")
     print("Retorno futuro: NÃO UTILIZADO")
+    print("Fail-safe de retorno futuro: OK")
     print("Margem bruta baixa como vantagem: NÃO")
     print("Score final de compra: NÃO")
     print("Quality Score: 0–1")
