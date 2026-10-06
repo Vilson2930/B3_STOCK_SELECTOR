@@ -31,7 +31,7 @@
 # REGRAS:
 # - sem look-ahead;
 # - retorno futuro proibido;
-# - Turnaround Research não entra no ranking;
+# - somente o modelo do estudo 50/30/20 autorizado pode entrar no ranking;
 # - uma empresa = um emissor na análise fundamental;
 # - execução determinística;
 # - fail-safe;
@@ -1822,8 +1822,9 @@ def run_pipeline(
     # -------------------------------------------------------------------------
     # TURNAROUND
     #
-    # Executa para pesquisa/auditoria.
-    # NÃO significa autorização no ranking.
+    # Executa o engine que contém o score fundamental do estudo.
+    # A autorização no ranking continua condicionada ao config e aos
+    # fail-safes do Ranking, Risk e auditoria global.
     # -------------------------------------------------------------------------
 
     turnaround = (
@@ -1889,14 +1890,111 @@ def run_pipeline(
             "FAIL-SAFE: retorno futuro utilizado."
         )
 
+    # O score 50/30/20 do estudo pode entrar no Ranking quando sua
+    # integridade já foi validada pelo Ranking Engine e pelo Risk Engine.
+    # O main não recalcula o modelo; apenas confirma os metadados finais.
     if audit[
         "turnaround_research_used_in_ranking"
     ]:
 
-        raise PipelineIntegrityError(
-            "FAIL-SAFE: Turnaround Research "
-            "entrou no ranking."
+        required_study_columns = {
+            "RANKING_MODEL",
+            "MARGEM_BRUTA_WEIGHT",
+            "MARGEM_LIQUIDA_WEIGHT",
+            "ROE_WEIGHT",
+        }
+
+        missing_study_columns = (
+            required_study_columns
+            - set(ranking.columns)
         )
+
+        if missing_study_columns:
+            raise PipelineIntegrityError(
+                "FAIL-SAFE: score do estudo entrou no ranking sem "
+                f"metadados obrigatórios: {sorted(missing_study_columns)}"
+            )
+
+        used_mask = (
+            ranking[
+                "TURNAROUND_RESEARCH_USED_IN_RANKING"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
+
+        models = (
+            ranking.loc[
+                used_mask,
+                "RANKING_MODEL",
+            ]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .unique()
+            .tolist()
+        )
+
+        if models != ["MB_50_ML_30_ROE_20_STUDY"]:
+            raise PipelineIntegrityError(
+                "FAIL-SAFE: modelo fundamental não autorizado "
+                f"detectado no ranking: {models}"
+            )
+
+        expected_weights = {
+            "MARGEM_BRUTA_WEIGHT": 0.50,
+            "MARGEM_LIQUIDA_WEIGHT": 0.30,
+            "ROE_WEIGHT": 0.20,
+        }
+
+        for column, expected in expected_weights.items():
+
+            values = pd.to_numeric(
+                ranking.loc[
+                    used_mask,
+                    column,
+                ],
+                errors="coerce",
+            )
+
+            if values.isna().any():
+                raise PipelineIntegrityError(
+                    "FAIL-SAFE: peso ausente/inválido no ranking: "
+                    f"{column}"
+                )
+
+            if not (
+                (values - expected).abs() <= 1e-12
+            ).all():
+                raise PipelineIntegrityError(
+                    "FAIL-SAFE: peso divergente do estudo no ranking: "
+                    f"{column}; esperado={expected}."
+                )
+
+        for column in (
+            "QUALITY_WEIGHT",
+            "VALUATION_WEIGHT",
+        ):
+            if column in ranking.columns:
+
+                values = pd.to_numeric(
+                    ranking.loc[
+                        used_mask,
+                        column,
+                    ],
+                    errors="coerce",
+                )
+
+                if (
+                    values.isna().any()
+                    or not (
+                        values.abs() <= 1e-12
+                    ).all()
+                ):
+                    raise PipelineIntegrityError(
+                        "FAIL-SAFE: peso legado diferente de zero "
+                        f"detectado em {column}."
+                    )
 
     # -------------------------------------------------------------------------
     # REPORT
@@ -2042,7 +2140,7 @@ def run_pipeline(
             VERSION,
 
         "pipeline_version":
-            "0.1.0",
+            "0.2.0",
 
         "status":
             "SUCCESS",
@@ -2175,7 +2273,7 @@ def run_pipeline_safe(
                 VERSION,
 
             "pipeline_version":
-                "0.1.0",
+                "0.2.0",
 
             "status":
                 "FAILED",
@@ -2421,7 +2519,7 @@ if __name__ == "__main__":
             "VALUATION → RANKING → RISK → REPORT"
         )
         print()
-        print("Turnaround Research: BLOQUEADO NO RANKING")
+        print("Modelo do estudo 50/30/20: AUTORIZADO COM FAIL-SAFE")
         print("Retorno futuro: PROIBIDO")
         print("Look-ahead: PROIBIDO")
         print("=" * 78)
