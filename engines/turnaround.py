@@ -4,7 +4,7 @@
 #
 # TURNAROUND / ASYMMETRY ENGINE
 #
-# SCORE EXPERIMENTAL FUNDAMENTAL:
+# SCORE FUNDAMENTAL DO ESTUDO:
 #
 #   MARGEM_BRUTA    = 50%
 #   MARGEM_LIQUIDA  = 30%
@@ -15,9 +15,10 @@
 # IMPORTANTE:
 # - pesos baseados na força relativa da evidência encontrada;
 # - não são pesos otimizados por retorno futuro;
-# - score permanece EXPERIMENTAL;
-# - não gera compra;
-# - produção permanece bloqueada até validação temporal adicional.
+# - retorno futuro jamais entra no cálculo;
+# - o score pode ser usado pelo Ranking quando explicitamente autorizado
+#   em config.py;
+# - a origem científica e as limitações do estudo permanecem auditáveis.
 # =============================================================================
 
 from __future__ import annotations
@@ -706,14 +707,38 @@ def run_turnaround_engine(
                 "FAIL-SAFE: regra validada ausente."
             )
 
-        raise TurnaroundProductionError(
-            "FAIL-SAFE: execução de produção ainda "
-            "não implementada. Pesquisa preservada."
+        if validated_rule != "MB_50_ML_30_ROE_20":
+            raise TurnaroundProductionError(
+                "FAIL-SAFE: regra operacional divergente do modelo "
+                "MB_50_ML_30_ROE_20."
+            )
+
+        configured_weights = TURNAROUND_ENGINE.get(
+            "study_weights",
+            RESEARCH_WEIGHTS,
+        )
+
+        if configured_weights != RESEARCH_WEIGHTS:
+            raise TurnaroundProductionError(
+                "FAIL-SAFE: pesos configurados divergem do modelo "
+                "50/30/20 implementado."
+            )
+
+        result[
+            "TURNAROUND_OPERATIONAL_SIGNAL"
+        ] = np.where(
+            result[
+                "TURNAROUND_RESEARCH_SCORE_VALID"
+            ]
+            .fillna(False)
+            .astype(bool),
+            "STUDY_SCORE_AUTHORIZED",
+            "INSUFFICIENT_DATA",
         )
 
     result[
         "TURNAROUND_ENGINE_VERSION"
-    ] = "0.2.0"
+    ] = "0.3.0"
 
     result[
         "TURNAROUND_ENGINE_STATUS"
@@ -725,7 +750,7 @@ def run_turnaround_engine(
     result[
         "TURNAROUND_SCORE_MODEL"
     ] = (
-        "MB_50_ML_30_ROE_20_RESEARCH"
+        "MB_50_ML_30_ROE_20_STUDY"
     )
 
     result[
@@ -821,9 +846,18 @@ def audit_turnaround(
 
     return {
         "status": "OK",
-        "mode": "RESEARCH_ONLY",
+        "mode": (
+            "STUDY_OPERATIONAL"
+            if bool(
+                TURNAROUND_ENGINE.get(
+                    "production_authorized",
+                    False,
+                )
+            )
+            else "RESEARCH_ONLY"
+        ),
         "score_model":
-            "MB_50_ML_30_ROE_20_RESEARCH",
+            "MB_50_ML_30_ROE_20_STUDY",
         "issuers":
             int(len(result)),
         "valid_complete_scores":
@@ -850,6 +884,13 @@ def audit_turnaround(
             False,
         "buy_signal_generated":
             False,
+        "operational_score_available":
+            bool(
+                TURNAROUND_ENGINE.get(
+                    "production_authorized",
+                    False,
+                )
+            ),
     }
 
 
@@ -892,7 +933,7 @@ def save_turnaround(
         "engine":
             "TURNAROUND_ENGINE",
         "version":
-            "0.2.0",
+            "0.3.0",
         "created_at_utc":
             _utc_now_iso(),
         "formation_date":
@@ -1091,16 +1132,55 @@ def _self_test():
             "SELF-TEST: pesos 50/30/20 incorretos."
         )
 
-    if not (
-        result[
-            "TURNAROUND_OPERATIONAL_SIGNAL"
-        ]
-        ==
-        "BLOCKED_RESEARCH_ONLY"
-    ).all():
-        raise TurnaroundError(
-            "SELF-TEST: sinal operacional liberado indevidamente."
+    production_authorized = bool(
+        TURNAROUND_ENGINE.get(
+            "production_authorized",
+            False,
         )
+    )
+
+    if production_authorized:
+        valid_mask = (
+            result[
+                "TURNAROUND_RESEARCH_SCORE_VALID"
+            ]
+            .fillna(False)
+            .astype(bool)
+        )
+
+        if not (
+            result.loc[
+                valid_mask,
+                "TURNAROUND_OPERATIONAL_SIGNAL",
+            ]
+            == "STUDY_SCORE_AUTHORIZED"
+        ).all():
+            raise TurnaroundError(
+                "SELF-TEST: score 50/30/20 autorizado não foi "
+                "liberado corretamente."
+            )
+
+        if (
+            result.loc[
+                ~valid_mask,
+                "TURNAROUND_OPERATIONAL_SIGNAL",
+            ]
+            == "STUDY_SCORE_AUTHORIZED"
+        ).any():
+            raise TurnaroundError(
+                "SELF-TEST: score incompleto foi liberado."
+            )
+
+    else:
+        if not (
+            result[
+                "TURNAROUND_OPERATIONAL_SIGNAL"
+            ]
+            == "BLOCKED_RESEARCH_ONLY"
+        ).all():
+            raise TurnaroundError(
+                "SELF-TEST: sinal operacional liberado sem autorização."
+            )
 
     if (
         result[
@@ -1158,8 +1238,19 @@ if __name__ == "__main__":
     _self_test()
 
     print("Self-test: OK")
-    print("Modo: RESEARCH ONLY")
-    print("Score experimental:")
+    production_authorized = bool(
+        TURNAROUND_ENGINE.get(
+            "production_authorized",
+            False,
+        )
+    )
+    print(
+        "Modo:",
+        "STUDY OPERATIONAL"
+        if production_authorized
+        else "RESEARCH ONLY",
+    )
+    print("Score do estudo:")
     print("  MARGEM_BRUTA   = 50%")
     print("  MARGEM_LIQUIDA = 30%")
     print("  ROE            = 20%")
@@ -1169,7 +1260,11 @@ if __name__ == "__main__":
     print("ESTOQUES: BLOQUEADO")
     print("DÍVIDA/ATIVO como oportunidade: BLOQUEADO")
     print("INTANGÍVEL/ATIVO como oportunidade: BLOQUEADO")
-    print("Sinal de compra: NÃO")
-    print("Produção: BLOQUEADA")
-    print("Validação temporal adicional: NECESSÁRIA")
+    print("Sinal direto de compra: NÃO")
+    print(
+        "Score operacional no Ranking:",
+        "AUTORIZADO"
+        if production_authorized
+        else "BLOQUEADO",
+    )
     print("=" * 72)
