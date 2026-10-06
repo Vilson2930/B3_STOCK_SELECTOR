@@ -35,6 +35,7 @@ import hashlib
 import io
 import json
 import re
+import time
 import zipfile
 
 from datetime import datetime, timezone
@@ -106,6 +107,11 @@ B3_COTAHIST_URL = (
 
 REQUEST_TIMEOUT = 180
 CHUNK_SIZE = 1024 * 1024
+
+# Download resiliente para falhas transitórias da B3/GitHub runner.
+# Cada tentativa reinicia o arquivo temporário; nunca promove download parcial.
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_BACKOFF_SECONDS = 5
 
 USER_AGENT = (
     "B3-STOCK-SELECTOR/0.1 "
@@ -419,7 +425,7 @@ def download_cotahist(
             )
 
     # -------------------------------------------------------------------------
-    # DOWNLOAD TEMPORÁRIO
+    # DOWNLOAD TEMPORÁRIO COM RETRY LIMITADO
     # -------------------------------------------------------------------------
 
     temp_path = (
@@ -427,91 +433,140 @@ def download_cotahist(
         / f"{destination.name}.part"
     )
 
-    temp_path.unlink(
-        missing_ok=True
-    )
+    last_error = None
 
-    try:
+    for attempt in range(
+        1,
+        DOWNLOAD_MAX_ATTEMPTS + 1,
+    ):
 
-        with requests.get(
-            url,
-            stream=True,
-            timeout=REQUEST_TIMEOUT,
-            headers={
-                "User-Agent": USER_AGENT
-            },
-        ) as response:
+        temp_path.unlink(
+            missing_ok=True
+        )
 
-            if response.status_code != 200:
+        try:
 
-                raise MarketDownloadError(
-                    "Falha ao baixar COTAHIST. "
-                    f"HTTP {response.status_code}. "
-                    f"URL={url}"
+            with requests.get(
+                url,
+                stream=True,
+                timeout=REQUEST_TIMEOUT,
+                headers={
+                    "User-Agent": USER_AGENT
+                },
+            ) as response:
+
+                if response.status_code != 200:
+
+                    raise MarketDownloadError(
+                        "Falha ao baixar COTAHIST. "
+                        f"HTTP {response.status_code}. "
+                        f"URL={url}"
+                    )
+
+                expected_size = response.headers.get(
+                    "Content-Length"
                 )
 
-            with temp_path.open(
-                "wb"
-            ) as file:
+                with temp_path.open(
+                    "wb"
+                ) as file:
 
-                for chunk in response.iter_content(
-                    chunk_size=CHUNK_SIZE
+                    for chunk in response.iter_content(
+                        chunk_size=CHUNK_SIZE
+                    ):
+
+                        if chunk:
+                            file.write(chunk)
+
+            if not temp_path.exists():
+
+                raise MarketDownloadError(
+                    "Download terminou sem criar arquivo temporário."
+                )
+
+            actual_size = temp_path.stat().st_size
+
+            if actual_size <= 0:
+
+                raise MarketDownloadError(
+                    "Download COTAHIST resultou em arquivo vazio."
+                )
+
+            if expected_size is not None:
+
+                try:
+                    expected_size_int = int(
+                        expected_size
+                    )
+                except (TypeError, ValueError):
+                    expected_size_int = None
+
+                if (
+                    expected_size_int is not None
+                    and expected_size_int > 0
+                    and actual_size != expected_size_int
                 ):
 
-                    if chunk:
-                        file.write(chunk)
+                    raise MarketDownloadError(
+                        "Download COTAHIST incompleto. "
+                        f"Esperado={expected_size_int} bytes; "
+                        f"recebido={actual_size} bytes."
+                    )
 
-    except MarketDataError:
+            # A validação estrutural do ZIP é obrigatória antes de promover
+            # o arquivo temporário para o cache definitivo.
+            validate_cotahist_zip(
+                temp_path
+            )
 
-        temp_path.unlink(
-            missing_ok=True
-        )
+            temp_path.replace(
+                destination
+            )
 
-        raise
+            validate_cotahist_zip(
+                destination
+            )
 
-    except Exception as exc:
+            _save_manifest(
+                year=year,
+                path=destination,
+                source_url=url,
+            )
 
-        temp_path.unlink(
-            missing_ok=True
-        )
+            return destination
 
-        raise MarketDownloadError(
-            f"Erro no download COTAHIST {year}: {exc}"
-        ) from exc
+        except Exception as exc:
 
-    # -------------------------------------------------------------------------
-    # VALIDAÇÃO
-    # -------------------------------------------------------------------------
+            last_error = exc
 
-    try:
+            temp_path.unlink(
+                missing_ok=True
+            )
 
-        validate_cotahist_zip(
-            temp_path
-        )
+            # Erros HTTP determinísticos não devem ser mascarados por retry.
+            if (
+                isinstance(
+                    exc,
+                    MarketDownloadError,
+                )
+                and str(exc).startswith(
+                    "Falha ao baixar COTAHIST."
+                )
+            ):
+                raise
 
-    except Exception:
+            if attempt >= DOWNLOAD_MAX_ATTEMPTS:
+                break
 
-        temp_path.unlink(
-            missing_ok=True
-        )
+            time.sleep(
+                DOWNLOAD_RETRY_BACKOFF_SECONDS
+                * attempt
+            )
 
-        raise
-
-    temp_path.replace(
-        destination
-    )
-
-    validate_cotahist_zip(
-        destination
-    )
-
-    _save_manifest(
-        year=year,
-        path=destination,
-        source_url=url,
-    )
-
-    return destination
+    raise MarketDownloadError(
+        f"Erro no download COTAHIST {year} após "
+        f"{DOWNLOAD_MAX_ATTEMPTS} tentativas: {last_error}"
+    ) from last_error
 
 
 # =============================================================================
