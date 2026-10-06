@@ -21,7 +21,7 @@ from pathlib import Path
 # =============================================================================
 
 PROJECT_NAME = "B3_STOCK_SELECTOR"
-PROJECT_VERSION = "0.1.0"
+PROJECT_VERSION = "0.2.0"
 
 RANDOM_SEED = 42
 
@@ -135,9 +135,12 @@ TURNAROUND_ENGINE = {
 
     "enabled": True,
 
-    "production_authorized": False,
+    # O engine contém o score operacional derivado do estudo.
+    # A autorização abaixo refere-se especificamente ao uso do modelo
+    # 50/30/20 no ranking deste robô, sem retorno futuro.
+    "production_authorized": True,
 
-    "status": "RESEARCH_CANDIDATE",
+    "status": "STUDY_OPERATIONAL_MODEL",
 
     "primary_factor": "MARGEM_BRUTA",
 
@@ -148,12 +151,17 @@ TURNAROUND_ENGINE = {
         "ROE",
     ],
 
-    "validated_rule": None,
+    "validated_rule": "MB_50_ML_30_ROE_20",
+
+    "study_weights": {
+        "MARGEM_BRUTA": 0.50,
+        "MARGEM_LIQUIDA": 0.30,
+        "ROE": 0.20,
+    },
 
     "description": (
-        "Detectar empresas com rentabilidade deprimida e potencial "
-        "de recuperação operacional, sem confundir turnaround com "
-        "deterioração estrutural."
+        "Score fundamental do estudo: Margem Bruta 50%, "
+        "Margem Líquida 30% e ROE 20%, todos com direção LOW."
     ),
 }
 
@@ -270,7 +278,17 @@ VALUATION_ENGINE = {
 
 RANKING_ENGINE = {
 
-    "allow_research_factors": False,
+    # O ranking deste robô usa exclusivamente o modelo definido pelo estudo.
+    "model": "MB_50_ML_30_ROE_20_STUDY",
+
+    "study_weights": {
+        "MARGEM_BRUTA": 0.50,
+        "MARGEM_LIQUIDA": 0.30,
+        "ROE": 0.20,
+    },
+
+    # Não definir engine_weights: Quality/Valuation não entram no score.
+    "allow_research_factors": True,
 
     "allow_future_return": False,
 
@@ -373,8 +391,29 @@ def validate_config():
         and TURNAROUND_ENGINE["validated_rule"] is None
     ):
         raise RuntimeError(
-            "FAIL-SAFE: TURNAROUND NÃO PODE ENTRAR EM PRODUÇÃO "
-            "SEM REGRA VALIDADA."
+            "FAIL-SAFE: MODELO DO ESTUDO NÃO PODE ENTRAR EM PRODUÇÃO "
+            "SEM REGRA DEFINIDA."
+        )
+
+    expected_weights = {
+        "MARGEM_BRUTA": 0.50,
+        "MARGEM_LIQUIDA": 0.30,
+        "ROE": 0.20,
+    }
+
+    if RANKING_ENGINE.get("study_weights") != expected_weights:
+        raise RuntimeError(
+            "FAIL-SAFE: pesos do ranking divergentes do modelo 50/30/20."
+        )
+
+    if TURNAROUND_ENGINE.get("study_weights") != expected_weights:
+        raise RuntimeError(
+            "FAIL-SAFE: pesos do Turnaround divergentes do modelo 50/30/20."
+        )
+
+    if "engine_weights" in RANKING_ENGINE:
+        raise RuntimeError(
+            "FAIL-SAFE: engine_weights legado não é permitido neste robô."
         )
 
     return True
@@ -398,16 +437,10 @@ if __name__ == "__main__":
     print("Look-ahead permitido: NÃO")
     print("Retorno futuro no ranking: NÃO")
 
-    print(
-        "Turnaround em produção:",
-        "SIM"
-        if TURNAROUND_ENGINE["production_authorized"]
-        else "NÃO — PESQUISA"
-    )
-
-    print(
-        "Principal candidato científico:",
-        TURNAROUND_ENGINE["primary_factor"]
-    )
+    print("Modelo operacional do estudo: SIM")
+    print("Ranking: 50% Margem Bruta / 30% Margem Líquida / 20% ROE")
+    print("Direção dos três fatores: LOW")
+    print("Quality no score principal: NÃO")
+    print("Valuation no score principal: NÃO")
 
     print("=" * 72)
