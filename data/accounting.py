@@ -2288,17 +2288,25 @@ def _find_fca_security_file(
 
     for filename in files:
 
-        normalized = _normalize_text(
-            Path(filename).name
+        normalized = (
+            _normalize_text(
+                Path(filename).name
+            )
+            .replace(" ", "_")
         )
 
         if (
             "VALOR_MOBILIARIO"
             in normalized
+            and normalized.endswith(".CSV")
         ):
             candidates.append(
                 filename
             )
+
+    candidates = sorted(
+        set(candidates)
+    )
 
     if len(candidates) != 1:
         raise AccountingIdentityError(
@@ -2310,6 +2318,327 @@ def _find_fca_security_file(
     return candidates[0]
 
 
+def _find_fca_general_file(
+    year: int,
+) -> str:
+    """
+    Localiza o arquivo oficial fca_cia_aberta_geral.
+
+    A seção geral é mantida separada do arquivo de valores mobiliários
+    pela própria CVM. Ela é usada exclusivamente como fonte cadastral
+    para a classificação setorial/atividade do emissor.
+    """
+
+    files = list_zip_files(
+        "FCA",
+        int(year),
+    )
+
+    candidates = []
+
+    for filename in files:
+
+        normalized = (
+            _normalize_text(
+                Path(filename).name
+            )
+            .replace(" ", "_")
+        )
+
+        basename = Path(
+            normalized
+        ).name
+
+        if (
+            basename.endswith(".CSV")
+            and "FCA_CIA_ABERTA_GERAL" in basename
+        ):
+            candidates.append(
+                filename
+            )
+
+    candidates = sorted(
+        set(candidates)
+    )
+
+    if len(candidates) != 1:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: arquivo FCA geral não identificado "
+            f"de forma única em FCA/{year}. "
+            f"Encontrados: {candidates}"
+        )
+
+    return candidates[0]
+
+
+def _find_fca_activity_column(
+    raw: pd.DataFrame,
+) -> str:
+    """
+    Identifica de forma conservadora a coluna oficial que descreve
+    setor/atividade do emissor no FCA geral.
+
+    Primeiro tenta nomes canônicos conhecidos. Se o esquema oficial
+    mudar, aceita descoberta estrutural somente quando houver uma única
+    coluna inequívoca contendo simultaneamente SETOR e ATIVIDADE.
+    """
+
+    column = _find_column(
+        raw,
+        (
+            "SETOR_ATIVIDADE",
+            "SETOR_DE_ATIVIDADE",
+            "SETOR_ATIVIDADE_PRINCIPAL",
+            "SETOR_DE_ATIVIDADE_PRINCIPAL",
+        ),
+        required=False,
+    )
+
+    if column is not None:
+        return column
+
+    candidates = []
+
+    for candidate in raw.columns:
+
+        normalized = _normalize_column(
+            candidate
+        )
+
+        if (
+            "SETOR" in normalized
+            and "ATIVIDADE" in normalized
+        ):
+            candidates.append(
+                candidate
+            )
+
+    candidates = list(
+        dict.fromkeys(candidates)
+    )
+
+    if len(candidates) != 1:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: coluna de setor/atividade do FCA geral "
+            "não identificada de forma inequívoca. "
+            f"Candidatas={candidates}. "
+            f"Colunas disponíveis={sorted(raw.columns.tolist())}"
+        )
+
+    return candidates[0]
+
+
+def _is_financial_activity(
+    value,
+) -> bool:
+    """
+    Regra estrutural compatível com o Universe Engine.
+
+    Não cria lista manual de tickers. A decisão depende somente da
+    classificação oficial de setor/atividade trazida pelo FCA.
+    """
+
+    normalized = _normalize_text(
+        value
+    )
+
+    if not normalized:
+        return False
+
+    return any(
+        token in normalized
+        for token in (
+            "FINANCEIR",
+            "BANCO",
+            "SEGURO",
+        )
+    )
+
+
+def _read_fca_issuer_classification(
+    year: int,
+) -> pd.DataFrame:
+    """
+    Lê a seção geral do FCA e produz uma linha por emissor com:
+        ISSUER_ID
+        FCA_SETOR_ATIVIDADE
+        FINANCIAL_SPECIAL
+
+    A classificação é cadastral e não participa do score. Seu único
+    objetivo neste projeto é impedir que instituições financeiras sejam
+    enviadas ao modelo fundamental industrial quando a exclusão estiver
+    habilitada no config.py.
+    """
+
+    filename = _find_fca_general_file(
+        int(year)
+    )
+
+    raw = read_csv_from_zip(
+        "FCA",
+        int(year),
+        filename,
+    )
+
+    raw = _normalize_columns(
+        raw
+    )
+
+    if raw.empty:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: FCA geral vazio."
+        )
+
+    cnpj_col = _find_column(
+        raw,
+        (
+            "CNPJ_COMPANHIA",
+            "CNPJ_CIA",
+            "CNPJ",
+        ),
+        required=False,
+    )
+
+    cvm_col = _find_column(
+        raw,
+        (
+            "CODIGO_CVM",
+            "CD_CVM",
+        ),
+        required=False,
+    )
+
+    if cnpj_col is None and cvm_col is None:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: FCA geral sem identificador de emissor."
+        )
+
+    activity_col = _find_fca_activity_column(
+        raw
+    )
+
+    reference_col = _find_column(
+        raw,
+        (
+            "DT_REFER",
+            "DATA_REFERENCIA",
+            "DT_REFERENCIA",
+        ),
+        required=False,
+    )
+
+    version_col = _find_column(
+        raw,
+        (
+            "VERSAO",
+            "VERSAO_DOCUMENTO",
+        ),
+        required=False,
+    )
+
+    result = pd.DataFrame(
+        index=raw.index
+    )
+
+    if cnpj_col is not None:
+        result["ISSUER_ID"] = (
+            raw[cnpj_col]
+            .map(_cnpj)
+        )
+    else:
+        result["ISSUER_ID"] = (
+            raw[cvm_col]
+            .map(_issuer_id)
+        )
+
+    result[
+        "FCA_SETOR_ATIVIDADE"
+    ] = (
+        raw[activity_col]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    if reference_col is not None:
+        result[
+            "_FCA_REFERENCE_DATE"
+        ] = _parse_dates(
+            raw[reference_col]
+        )
+    else:
+        result[
+            "_FCA_REFERENCE_DATE"
+        ] = pd.NaT
+
+    if version_col is not None:
+        result[
+            "_FCA_VERSION"
+        ] = pd.to_numeric(
+            raw[version_col],
+            errors="coerce",
+        )
+    else:
+        result[
+            "_FCA_VERSION"
+        ] = np.nan
+
+    result = result.loc[
+        result["ISSUER_ID"].notna()
+        & (
+            result[
+                "FCA_SETOR_ATIVIDADE"
+            ] != ""
+        )
+    ].copy()
+
+    if result.empty:
+        raise AccountingIdentityError(
+            "FAIL-SAFE: FCA geral não produziu "
+            "classificação setorial válida."
+        )
+
+    result = result.sort_values(
+        [
+            "ISSUER_ID",
+            "_FCA_REFERENCE_DATE",
+            "_FCA_VERSION",
+        ],
+        na_position="first",
+        kind="mergesort",
+    )
+
+    result = result.drop_duplicates(
+        subset=["ISSUER_ID"],
+        keep="last",
+    )
+
+    result[
+        "FINANCIAL_SPECIAL"
+    ] = result[
+        "FCA_SETOR_ATIVIDADE"
+    ].map(
+        _is_financial_activity
+    ).astype(bool)
+
+    result = result[
+        [
+            "ISSUER_ID",
+            "FCA_SETOR_ATIVIDADE",
+            "FINANCIAL_SPECIAL",
+        ]
+    ].reset_index(
+        drop=True
+    )
+
+    assert_no_future_information(
+        result,
+        stage="FCA issuer classification",
+    )
+
+    return result
+
+
 def build_identity_map(
     year: int,
     *,
@@ -2318,16 +2647,21 @@ def build_identity_map(
     ] = None,
 ) -> pd.DataFrame:
     """
-    Constrói:
+    Constrói diretamente do FCA oficial:
         TICKER
         ISSUER_ID
         CNPJ
+        CD_CVM
         ISSUER_NAME
+        COMPANY_NAME
+        FCA_SETOR_ATIVIDADE
+        FINANCIAL_SPECIAL
 
-    diretamente do FCA oficial.
+    A classificação financeira é usada apenas como proteção estrutural;
+    não entra em score ou ranking.
     """
 
-    zip_path = download_dataset(
+    download_dataset(
         "FCA",
         int(year),
     )
@@ -2425,6 +2759,10 @@ def build_identity_map(
     else:
         result["ISSUER_NAME"] = None
 
+    result["COMPANY_NAME"] = (
+        result["ISSUER_NAME"]
+    )
+
     result = result.loc[
         result["TICKER"].notna()
         & result["ISSUER_ID"].notna()
@@ -2442,9 +2780,6 @@ def build_identity_map(
                 allowed
             )
         ].copy()
-
-    # Um ticker não pode apontar para múltiplos
-    # emissores dentro do snapshot utilizado.
 
     conflicts = (
         result.groupby("TICKER")[
@@ -2482,6 +2817,75 @@ def build_identity_map(
         raise AccountingIdentityError(
             "FAIL-SAFE: identity_map FCA vazio."
         )
+
+    classification = (
+        _read_fca_issuer_classification(
+            int(year)
+        )
+    )
+
+    result = result.merge(
+        classification,
+        on="ISSUER_ID",
+        how="left",
+        validate="many_to_one",
+    )
+
+    exclusion_required = bool(
+        getattr(
+            project_config,
+            "EXCLUDE_FINANCIALS_FROM_STANDARD_FUNDAMENTAL_MODEL",
+            False,
+        )
+    )
+
+    if exclusion_required:
+
+        missing_classification = (
+            result[
+                "FCA_SETOR_ATIVIDADE"
+            ].isna()
+            | (
+                result[
+                    "FCA_SETOR_ATIVIDADE"
+                ]
+                .astype(str)
+                .str.strip()
+                == ""
+            )
+        )
+
+        if missing_classification.any():
+            examples = (
+                result.loc[
+                    missing_classification,
+                    [
+                        "TICKER",
+                        "ISSUER_ID",
+                        "COMPANY_NAME",
+                    ],
+                ]
+                .head(20)
+                .to_dict(
+                    orient="records"
+                )
+            )
+
+            raise AccountingIdentityError(
+                "FAIL-SAFE: exclusão de financeiras está habilitada, "
+                "mas existem securities sem classificação oficial "
+                "de setor/atividade no FCA. A execução foi bloqueada "
+                "para impedir entrada silenciosa de banco/financeira. "
+                f"Exemplos={examples}"
+            )
+
+        result[
+            "FINANCIAL_SPECIAL"
+        ] = result[
+            "FINANCIAL_SPECIAL"
+        ].fillna(
+            False
+        ).astype(bool)
 
     assert_no_future_information(
         result,
@@ -3418,28 +3822,82 @@ def build_accounting_data(
             _issuer_id
         )
 
-        issuer_identity = (
-            identity.sort_values(
-                [
-                    "ISSUER_ID",
-                    "TICKER",
-                ]
+        issuer_rows = []
+
+        optional_identity_columns = [
+            column
+            for column in (
+                "CNPJ",
+                "CD_CVM",
+                "ISSUER_NAME",
+                "COMPANY_NAME",
+                "FCA_SETOR_ATIVIDADE",
+                "FINANCIAL_SPECIAL",
             )
-            .groupby(
-                "ISSUER_ID",
-                as_index=False,
-            )
-            .agg(
-                TICKERS=(
-                    "TICKER",
-                    lambda x:
-                    ",".join(
-                        sorted(
-                            set(x)
+            if column in identity.columns
+        ]
+
+        for issuer_id, group in identity.groupby(
+            "ISSUER_ID",
+            sort=True,
+        ):
+
+            row = {
+                "ISSUER_ID": issuer_id,
+                "TICKERS": ",".join(
+                    sorted(
+                        set(
+                            group["TICKER"]
+                            .dropna()
+                            .astype(str)
                         )
-                    ),
+                    )
+                ),
+            }
+
+            for column in optional_identity_columns:
+
+                if column == "FINANCIAL_SPECIAL":
+                    row[column] = bool(
+                        group[column]
+                        .fillna(False)
+                        .astype(bool)
+                        .any()
+                    )
+                    continue
+
+                values = (
+                    group[column]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
                 )
-            )
+
+                values = sorted(
+                    set(
+                        value
+                        for value in values
+                        if value != ""
+                    )
+                )
+
+                if len(values) > 1:
+                    raise AccountingIdentityError(
+                        "FAIL-SAFE: identidade FCA inconsistente "
+                        f"para ISSUER_ID={issuer_id}, "
+                        f"coluna={column}, valores={values}"
+                    )
+
+                row[column] = (
+                    values[0]
+                    if values
+                    else None
+                )
+
+            issuer_rows.append(row)
+
+        issuer_identity = pd.DataFrame(
+            issuer_rows
         )
 
         base = base.merge(
