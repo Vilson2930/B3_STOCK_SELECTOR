@@ -1780,11 +1780,97 @@ def run_pipeline(
     )
 
     # -------------------------------------------------------------------------
+    # IDENTIDADE DO EMISSOR -> BASE FUNDAMENTAL
+    #
+    # O Universe Engine já consolidou a relação econômica por ISSUER_ID e
+    # preservou TICKERS / COMPANY_NAME quando disponíveis. A base contábil,
+    # porém, é a entrada efetiva de Fundamentals e, sem esta ponte explícita,
+    # esses campos de identidade se perdem antes de Ranking/Risk/Report.
+    #
+    # Regras:
+    # - merge somente por ISSUER_ID;
+    # - somente campos descritivos, nunca fatores/scoring;
+    # - cardinalidade one_to_one obrigatória;
+    # - não sobrescreve coluna já existente na base contábil;
+    # - não altera o modelo 50/30/20;
+    # - não introduz informação futura.
+    # -------------------------------------------------------------------------
+
+    if "ISSUER_ID" not in issuer_universe.columns:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ISSUER_UNIVERSE sem ISSUER_ID "
+            "para propagação de identidade."
+        )
+
+    if issuer_universe["ISSUER_ID"].duplicated().any():
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ISSUER_UNIVERSE possui ISSUER_ID duplicado "
+            "antes da propagação de identidade."
+        )
+
+    if "ISSUER_ID" not in accounting_data.columns:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ACCOUNTING_DATA sem ISSUER_ID "
+            "antes da propagação de identidade."
+        )
+
+    identity_columns = [
+        column
+        for column in (
+            "TICKERS",
+            "COMPANY_NAME",
+            "CNPJ",
+            "CD_CVM",
+        )
+        if (
+            column in issuer_universe.columns
+            and column not in accounting_data.columns
+        )
+    ]
+
+    if identity_columns:
+
+        rows_before_identity_merge = len(
+            accounting_data
+        )
+
+        accounting_data = (
+            accounting_data.merge(
+                issuer_universe[
+                    [
+                        "ISSUER_ID",
+                        *identity_columns,
+                    ]
+                ],
+                on="ISSUER_ID",
+                how="left",
+                validate="one_to_one",
+            )
+        )
+
+        if (
+            len(accounting_data)
+            != rows_before_identity_merge
+        ):
+            raise PipelineIntegrityError(
+                "FAIL-SAFE: propagação de identidade alterou "
+                "a cardinalidade da base contábil."
+            )
+
+        assert_no_future_information(
+            accounting_data,
+            "ACCOUNTING_WITH_ISSUER_IDENTITY",
+        )
+
+    # -------------------------------------------------------------------------
     # FUNDAMENTALS
     #
     # O Fundamental Engine transforma a base contábil PIT em indicadores.
     # Ele precisa existir ANTES do Investability Gate, pois o gate valida
     # cobertura fundamental mínima por emissor.
+    #
+    # A partir daqui TICKERS / COMPANY_NAME, quando disponíveis no Universe,
+    # acompanham a base como metadados descritivos até o relatório.
     # -------------------------------------------------------------------------
 
     fundamentals, fundamental_coverage = (
@@ -2140,7 +2226,7 @@ def run_pipeline(
             VERSION,
 
         "pipeline_version":
-            "0.2.0",
+            "0.3.0",
 
         "status":
             "SUCCESS",
@@ -2273,7 +2359,7 @@ def run_pipeline_safe(
                 VERSION,
 
             "pipeline_version":
-                "0.2.0",
+                "0.3.0",
 
             "status":
                 "FAILED",
