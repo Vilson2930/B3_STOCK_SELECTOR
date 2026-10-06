@@ -3,7 +3,7 @@ B3 STOCK SELECTOR — ACCOUNTING ENGINE
 
 Responsabilidade
 ----------------
-Transformar os arquivos oficiais brutos da CVM (FCA / ITR / DFP)
+Transformar os arquivos oficiais brutos da CVM (FCA / ITR / DFP / FRE)
 em uma base contábil canônica por emissor, respeitando estritamente
 Point-in-Time (PIT).
 
@@ -1237,6 +1237,1038 @@ def _build_capital_composition(
     return result.reset_index(
         drop=True
     )
+
+
+
+# =============================================================================
+# FRE — CAPITAL SOCIAL POR CLASSE DE AÇÃO
+# =============================================================================
+#
+# Esta camada NÃO substitui a Composição do Capital DFP/ITR.
+#
+# Objetivo:
+# - obter do FRE a quantidade emitida por espécie/classe;
+# - combinar essa informação com a tesouraria agregada já obtida de DFP/ITR;
+# - produzir SHARES_CLASS_OUTSTANDING somente quando o cálculo for
+#   matematicamente determinado;
+# - nunca ratear tesouraria entre PNA/PNB ou outras classes por hipótese.
+#
+# Saída longa:
+#     ISSUER_ID
+#     SHARE_CLASS
+#     SHARE_SPECIES
+#     SHARE_SUBCLASS
+#     SHARES_CLASS_ISSUED
+#     SHARES_CLASS_TREASURY
+#     SHARES_CLASS_OUTSTANDING
+#     SHARE_CLASS_EXACT
+#     FRE_REFERENCE_DATE
+#     FRE_VERSION
+#     FRE_SOURCE_YEAR
+#     FRE_SOURCE_FILE
+#
+# A descoberta do esquema é fail-safe: se o arquivo oficial mudar e as colunas
+# necessárias não puderem ser identificadas de forma inequívoca, a execução
+# interrompe com a lista real de colunas do CSV. Nenhum dado é inventado.
+# =============================================================================
+
+def _find_fre_capital_class_file(
+    year: int,
+) -> str:
+
+    download_dataset(
+        "FRE",
+        int(year),
+    )
+
+    files = list_zip_files(
+        "FRE",
+        int(year),
+    )
+
+    candidates = []
+
+    for filename in files:
+
+        normalized = (
+            _normalize_text(
+                Path(filename).name
+            )
+            .replace(" ", "_")
+        )
+
+        if (
+            "CAPITAL_SOCIAL_CLASSE_ACAO"
+            in normalized
+            and normalized.endswith(".CSV")
+            and "AUMENTO" not in normalized
+            and "REDUCAO" not in normalized
+            and "DESDOBRAMENTO" not in normalized
+        ):
+            candidates.append(filename)
+
+    candidates = sorted(
+        set(candidates)
+    )
+
+    if len(candidates) != 1:
+        raise AccountingDataError(
+            "FAIL-SAFE: arquivo FRE "
+            "Capital Social por Classe de Ação "
+            f"não identificado de forma única em FRE/{year}. "
+            f"Encontrados: {candidates}"
+        )
+
+    return candidates[0]
+
+
+def _find_column_by_tokens(
+    df: pd.DataFrame,
+    *,
+    required_all: Iterable[str] = (),
+    required_any: Iterable[str] = (),
+    forbidden: Iterable[str] = (),
+) -> Optional[str]:
+    """
+    Descoberta estrutural conservadora de coluna.
+
+    Retorna a coluna apenas quando existe exatamente uma candidata.
+    Não escolhe arbitrariamente entre colunas semanticamente ambíguas.
+    """
+
+    all_tokens = tuple(
+        _normalize_column(value)
+        for value in required_all
+    )
+
+    any_tokens = tuple(
+        _normalize_column(value)
+        for value in required_any
+    )
+
+    forbidden_tokens = tuple(
+        _normalize_column(value)
+        for value in forbidden
+    )
+
+    candidates = []
+
+    for column in df.columns:
+
+        normalized = _normalize_column(
+            column
+        )
+
+        if any(
+            token
+            and token in normalized
+            for token in forbidden_tokens
+        ):
+            continue
+
+        if any(
+            token
+            and token not in normalized
+            for token in all_tokens
+        ):
+            continue
+
+        if (
+            any_tokens
+            and not any(
+                token
+                and token in normalized
+                for token in any_tokens
+            )
+        ):
+            continue
+
+        candidates.append(column)
+
+    candidates = list(
+        dict.fromkeys(candidates)
+    )
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    return None
+
+
+def _normalize_share_class(
+    species,
+    share_class=None,
+) -> tuple[
+    Optional[str],
+    Optional[str],
+    Optional[str],
+]:
+    """
+    Normaliza espécie/classe sem inferir pelo ticker.
+
+    Exemplos aceitos:
+        Ordinária / ON
+        Preferencial / PN
+        Preferencial Classe A / PNA
+        Preferencial Classe B / PNB
+
+    Classes preferenciais diferentes permanecem diferentes.
+    """
+
+    species_text = _normalize_text(
+        species
+    )
+
+    class_text = _normalize_text(
+        share_class
+    )
+
+    combined = " ".join(
+        value
+        for value in (
+            species_text,
+            class_text,
+        )
+        if value
+    )
+
+    if not combined:
+        return None, None, None
+
+    is_on = (
+        "ORDIN" in combined
+        or re.search(
+            r"(^|[^A-Z])ON([^A-Z]|$)",
+            combined,
+        )
+        is not None
+    )
+
+    is_pn = (
+        "PREFER" in combined
+        or re.search(
+            r"(^|[^A-Z])PN[A-Z]?([^A-Z]|$)",
+            combined,
+        )
+        is not None
+    )
+
+    if is_on and is_pn:
+        return None, None, None
+
+    if is_on:
+        return "ON", "ON", None
+
+    if not is_pn:
+        return None, None, None
+
+    subclass = None
+
+    explicit = re.search(
+        r"(^|[^A-Z])PN([A-Z])([^A-Z]|$)",
+        combined,
+    )
+
+    if explicit is not None:
+        subclass = explicit.group(2)
+
+    if subclass is None:
+
+        match = re.search(
+            r"CLASSE\s+([A-Z])([^A-Z]|$)",
+            combined,
+        )
+
+        if match is not None:
+            subclass = match.group(1)
+
+    if subclass:
+        return (
+            f"PN{subclass}",
+            "PN",
+            subclass,
+        )
+
+    return "PN", "PN", None
+
+
+def _read_fre_capital_classes(
+    year: int,
+    context: AccountingContext,
+) -> pd.DataFrame:
+    """
+    Lê o arquivo oficial FRE Capital Social por Classe de Ação.
+
+    O parser usa primeiro nomes conhecidos/compatíveis e, apenas quando
+    inequívoco, descoberta estrutural por tokens. Mudança de esquema ambígua
+    causa fail-safe.
+    """
+
+    filename = _find_fre_capital_class_file(
+        int(year)
+    )
+
+    raw = read_csv_from_zip(
+        "FRE",
+        int(year),
+        filename,
+    )
+
+    raw = _normalize_columns(
+        raw
+    )
+
+    if raw.empty:
+        return pd.DataFrame()
+
+    cnpj_col = _find_column(
+        raw,
+        (
+            "CNPJ_CIA",
+            "CNPJ_COMPANHIA",
+            "CNPJ_EMISSOR",
+            "CNPJ",
+        ),
+        required=False,
+    )
+
+    cvm_col = _find_column(
+        raw,
+        (
+            "CD_CVM",
+            "CODIGO_CVM",
+        ),
+        required=False,
+    )
+
+    if cnpj_col is None and cvm_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE Capital Social por Classe de Ação "
+            "sem identificador de emissor. "
+            f"Colunas disponíveis: {sorted(raw.columns.tolist())}"
+        )
+
+    reference_col = _find_column(
+        raw,
+        (
+            "DT_REFER",
+            "DATA_REFERENCIA",
+            "DT_REFERENCIA",
+            "DATA_ULTIMA_ALTERACAO",
+            "DT_ULTIMA_ALTERACAO",
+        ),
+        required=False,
+    )
+
+    if reference_col is None:
+        reference_col = _find_column_by_tokens(
+            raw,
+            required_any=(
+                "DT_REFER",
+                "DATA_REFER",
+                "ULTIMA_ALTERACAO",
+            ),
+        )
+
+    if reference_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE Capital Social por Classe de Ação "
+            "sem data de referência identificável de forma inequívoca. "
+            f"Colunas disponíveis: {sorted(raw.columns.tolist())}"
+        )
+
+    version_col = _find_column(
+        raw,
+        (
+            "VERSAO",
+            "VERSAO_DOCUMENTO",
+            "VERSAO_FRE",
+        ),
+        required=False,
+    )
+
+    species_col = _find_column(
+        raw,
+        (
+            "ESPECIE_ACAO",
+            "ESPECIE",
+            "TIPO_ACAO",
+            "TIPO_ESPECIE_ACAO",
+        ),
+        required=False,
+    )
+
+    if species_col is None:
+        species_col = _find_column_by_tokens(
+            raw,
+            required_any=(
+                "ESPECIE",
+                "TIPO_ACAO",
+            ),
+            forbidden=(
+                "QUANT",
+                "QT_",
+                "PERCENT",
+                "VALOR",
+            ),
+        )
+
+    class_col = _find_column(
+        raw,
+        (
+            "CLASSE_ACAO",
+            "CLASSE",
+            "TIPO_CLASSE_ACAO",
+        ),
+        required=False,
+    )
+
+    if class_col is None:
+        class_col = _find_column_by_tokens(
+            raw,
+            required_all=(
+                "CLASSE",
+            ),
+            required_any=(
+                "ACAO",
+                "CLASSE",
+            ),
+            forbidden=(
+                "QUANT",
+                "QT_",
+                "PERCENT",
+                "VALOR",
+            ),
+        )
+
+    # Alguns esquemas podem trazer espécie e classe numa única coluna.
+    if species_col is None and class_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE Capital Social por Classe de Ação "
+            "sem espécie/classe identificável de forma inequívoca. "
+            f"Colunas disponíveis: {sorted(raw.columns.tolist())}"
+        )
+
+    quantity_col = _find_column(
+        raw,
+        (
+            "QT_ACOES",
+            "QT_ACAO",
+            "QUANTIDADE_ACOES",
+            "QUANTIDADE_ACAO",
+            "QTD_ACOES",
+            "QTD_ACAO",
+            "QT_ACOES_EMITIDAS",
+            "QUANTIDADE_ACOES_EMITIDAS",
+            "QT_ACAO_CAPITAL_SOCIAL",
+            "QT_ACOES_CAPITAL_SOCIAL",
+        ),
+        required=False,
+    )
+
+    if quantity_col is None:
+
+        quantity_candidates = []
+
+        for column in raw.columns:
+
+            normalized = _normalize_column(
+                column
+            )
+
+            has_quantity = (
+                "QUANT" in normalized
+                or normalized.startswith("QT_")
+                or normalized.startswith("QTD_")
+            )
+
+            has_share = (
+                "ACAO" in normalized
+                or "ACOES" in normalized
+            )
+
+            forbidden_quantity = any(
+                token in normalized
+                for token in (
+                    "PERCENT",
+                    "VALOR",
+                    "PRECO",
+                    "CAPITAL_AUTORIZ",
+                    "TESOUR",
+                    "CIRCUL",
+                )
+            )
+
+            if (
+                has_quantity
+                and has_share
+                and not forbidden_quantity
+            ):
+                quantity_candidates.append(
+                    column
+                )
+
+        quantity_candidates = list(
+            dict.fromkeys(
+                quantity_candidates
+            )
+        )
+
+        if len(quantity_candidates) == 1:
+            quantity_col = (
+                quantity_candidates[0]
+            )
+
+    if quantity_col is None:
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE Capital Social por Classe de Ação "
+            "sem coluna única de quantidade de ações emitidas. "
+            f"Colunas disponíveis: {sorted(raw.columns.tolist())}"
+        )
+
+    result = pd.DataFrame(
+        index=raw.index
+    )
+
+    if cnpj_col is not None:
+        result["ISSUER_ID"] = (
+            raw[cnpj_col]
+            .map(_cnpj)
+        )
+    else:
+        result["ISSUER_ID"] = (
+            raw[cvm_col]
+            .map(_issuer_id)
+        )
+
+    result[
+        "FRE_REFERENCE_DATE"
+    ] = _parse_dates(
+        raw[reference_col]
+    )
+
+    if version_col is not None:
+        result[
+            "FRE_VERSION"
+        ] = pd.to_numeric(
+            raw[version_col],
+            errors="coerce",
+        )
+    else:
+        result[
+            "FRE_VERSION"
+        ] = np.nan
+
+    species_values = (
+        raw[species_col]
+        if species_col is not None
+        else pd.Series(
+            "",
+            index=raw.index,
+        )
+    )
+
+    class_values = (
+        raw[class_col]
+        if class_col is not None
+        else pd.Series(
+            "",
+            index=raw.index,
+        )
+    )
+
+    normalized_classes = [
+        _normalize_share_class(
+            species,
+            share_class,
+        )
+        for species, share_class
+        in zip(
+            species_values,
+            class_values,
+        )
+    ]
+
+    result[
+        "SHARE_CLASS"
+    ] = [
+        value[0]
+        for value in normalized_classes
+    ]
+
+    result[
+        "SHARE_SPECIES"
+    ] = [
+        value[1]
+        for value in normalized_classes
+    ]
+
+    result[
+        "SHARE_SUBCLASS"
+    ] = [
+        value[2]
+        for value in normalized_classes
+    ]
+
+    result[
+        "SHARES_CLASS_ISSUED"
+    ] = _numeric(
+        raw[quantity_col]
+    )
+
+    result[
+        "FRE_SOURCE_YEAR"
+    ] = int(year)
+
+    result[
+        "FRE_SOURCE_FILE"
+    ] = filename
+
+    result = result.loc[
+        result["ISSUER_ID"].notna()
+        & result[
+            "FRE_REFERENCE_DATE"
+        ].notna()
+        & result[
+            "SHARE_CLASS"
+        ].notna()
+        & result[
+            "SHARES_CLASS_ISSUED"
+        ].notna()
+    ].copy()
+
+    result = result.loc[
+        result[
+            "FRE_REFERENCE_DATE"
+        ]
+        <= context.accounting_cutoff
+    ].copy()
+
+    if result.empty:
+        return result
+
+    invalid = (
+        result[
+            "SHARES_CLASS_ISSUED"
+        ] < 0
+    )
+
+    if invalid.any():
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE contém quantidade negativa "
+            "de ações por classe."
+        )
+
+    # Mantém a versão/data mais recente por emissor e classe.
+    result = result.sort_values(
+        [
+            "ISSUER_ID",
+            "SHARE_CLASS",
+            "FRE_REFERENCE_DATE",
+            "FRE_VERSION",
+        ],
+        na_position="first",
+    )
+
+    result = result.drop_duplicates(
+        subset=[
+            "ISSUER_ID",
+            "SHARE_CLASS",
+        ],
+        keep="last",
+    )
+
+    # Uma linha final por emissor/classe é condição obrigatória.
+    if result.duplicated(
+        subset=[
+            "ISSUER_ID",
+            "SHARE_CLASS",
+        ]
+    ).any():
+        raise AccountingDataError(
+            "FAIL-SAFE: FRE produziu classe duplicada "
+            "por emissor."
+        )
+
+    assert_no_future_information(
+        result,
+        stage="FRE capital social por classe",
+    )
+
+    return result.reset_index(
+        drop=True
+    )
+
+
+def build_share_class_data(
+    formation_date,
+    accounting_cutoff,
+) -> pd.DataFrame:
+    """
+    Produz quantidades por classe para a camada de Market Cap.
+
+    Regra de tesouraria:
+    - ON: usa tesouraria ON agregada DFP/ITR;
+    - PN com uma única classe: usa tesouraria PN agregada;
+    - PN com múltiplas classes:
+        * se tesouraria PN == 0, outstanding == issued;
+        * se tesouraria PN > 0 ou desconhecida, NÃO há rateio:
+          SHARES_CLASS_OUTSTANDING permanece NaN.
+    """
+
+    context = create_accounting_context(
+        formation_date,
+        accounting_cutoff,
+    )
+
+    current_year = int(
+        context.accounting_cutoff.year
+    )
+
+    # FRE é periódico/eventual. O ano corrente é a primeira fonte;
+    # ano anterior é fallback por emissor/classe.
+    frames = []
+
+    for year, priority in (
+        (current_year, 2),
+        (current_year - 1, 1),
+    ):
+
+        try:
+            frame = _read_fre_capital_classes(
+                year,
+                context,
+            )
+        except AccountingDataError:
+            # Erro de esquema no ano corrente não pode ser mascarado.
+            if year == current_year:
+                raise
+            frame = pd.DataFrame()
+
+        if not frame.empty:
+            frame = frame.copy()
+            frame[
+                "_FRE_SOURCE_PRIORITY"
+            ] = priority
+            frames.append(frame)
+
+    if not frames:
+        raise AccountingDataError(
+            "FAIL-SAFE: nenhum Capital Social por Classe "
+            "de Ação válido encontrado no FRE."
+        )
+
+    classes = pd.concat(
+        frames,
+        ignore_index=True,
+        sort=False,
+    )
+
+    classes = classes.sort_values(
+        [
+            "ISSUER_ID",
+            "SHARE_CLASS",
+            "FRE_REFERENCE_DATE",
+            "_FRE_SOURCE_PRIORITY",
+            "FRE_VERSION",
+        ],
+        na_position="first",
+    )
+
+    classes = classes.drop_duplicates(
+        subset=[
+            "ISSUER_ID",
+            "SHARE_CLASS",
+        ],
+        keep="last",
+    )
+
+    classes = classes.drop(
+        columns=[
+            "_FRE_SOURCE_PRIORITY",
+        ],
+        errors="ignore",
+    )
+
+    capital = _build_capital_composition(
+        context
+    )
+
+    if capital.empty:
+        raise AccountingDataError(
+            "FAIL-SAFE: composição DFP/ITR ausente; "
+            "não é possível determinar ações em tesouraria."
+        )
+
+    treasury_columns = [
+        column
+        for column in (
+            "ISSUER_ID",
+            "SHARES_ON_TREASURY",
+            "SHARES_PN_TREASURY",
+        )
+        if column in capital.columns
+    ]
+
+    if "ISSUER_ID" not in treasury_columns:
+        raise AccountingDataError(
+            "FAIL-SAFE: composição de capital sem ISSUER_ID."
+        )
+
+    classes = classes.merge(
+        capital[
+            treasury_columns
+        ],
+        on="ISSUER_ID",
+        how="left",
+        validate="many_to_one",
+    )
+
+    classes[
+        "SHARES_CLASS_TREASURY"
+    ] = np.nan
+
+    classes[
+        "SHARES_CLASS_OUTSTANDING"
+    ] = np.nan
+
+    classes[
+        "SHARE_CLASS_EXACT"
+    ] = False
+
+    # ON é uma espécie sem subclasses econômicas no modelo de tickers
+    # admitido pelo projeto. Só calculamos se a tesouraria ON é conhecida.
+    on_mask = (
+        classes[
+            "SHARE_SPECIES"
+        ] == "ON"
+    )
+
+    on_known = (
+        on_mask
+        & classes[
+            "SHARES_ON_TREASURY"
+        ].notna()
+    )
+
+    classes.loc[
+        on_known,
+        "SHARES_CLASS_TREASURY",
+    ] = classes.loc[
+        on_known,
+        "SHARES_ON_TREASURY",
+    ]
+
+    classes.loc[
+        on_known,
+        "SHARES_CLASS_OUTSTANDING",
+    ] = (
+        classes.loc[
+            on_known,
+            "SHARES_CLASS_ISSUED",
+        ]
+        - classes.loc[
+            on_known,
+            "SHARES_CLASS_TREASURY",
+        ]
+    )
+
+    classes.loc[
+        on_known,
+        "SHARE_CLASS_EXACT",
+    ] = True
+
+    # Para PN, a tesouraria DFP/ITR é agregada. Portanto só pode ser
+    # atribuída a uma classe quando há exatamente uma classe PN, ou quando
+    # a tesouraria agregada é zero.
+    pn_mask = (
+        classes[
+            "SHARE_SPECIES"
+        ] == "PN"
+    )
+
+    pn_counts = (
+        classes.loc[
+            pn_mask
+        ]
+        .groupby(
+            "ISSUER_ID"
+        )[
+            "SHARE_CLASS"
+        ]
+        .nunique()
+    )
+
+    classes[
+        "_PN_CLASS_COUNT"
+    ] = (
+        classes[
+            "ISSUER_ID"
+        ]
+        .map(pn_counts)
+    )
+
+    single_pn = (
+        pn_mask
+        & (
+            classes[
+                "_PN_CLASS_COUNT"
+            ] == 1
+        )
+        & classes[
+            "SHARES_PN_TREASURY"
+        ].notna()
+    )
+
+    zero_treasury_multi_pn = (
+        pn_mask
+        & (
+            classes[
+                "_PN_CLASS_COUNT"
+            ] > 1
+        )
+        & (
+            classes[
+                "SHARES_PN_TREASURY"
+            ] == 0
+        )
+    )
+
+    pn_exact = (
+        single_pn
+        | zero_treasury_multi_pn
+    )
+
+    classes.loc[
+        single_pn,
+        "SHARES_CLASS_TREASURY",
+    ] = classes.loc[
+        single_pn,
+        "SHARES_PN_TREASURY",
+    ]
+
+    classes.loc[
+        zero_treasury_multi_pn,
+        "SHARES_CLASS_TREASURY",
+    ] = 0.0
+
+    classes.loc[
+        pn_exact,
+        "SHARES_CLASS_OUTSTANDING",
+    ] = (
+        classes.loc[
+            pn_exact,
+            "SHARES_CLASS_ISSUED",
+        ]
+        - classes.loc[
+            pn_exact,
+            "SHARES_CLASS_TREASURY",
+        ]
+    )
+
+    classes.loc[
+        pn_exact,
+        "SHARE_CLASS_EXACT",
+    ] = True
+
+    negative = (
+        classes[
+            "SHARES_CLASS_OUTSTANDING"
+        ].notna()
+        & (
+            classes[
+                "SHARES_CLASS_OUTSTANDING"
+            ] < 0
+        )
+    )
+
+    if negative.any():
+        bad = (
+            classes.loc[
+                negative,
+                [
+                    "ISSUER_ID",
+                    "SHARE_CLASS",
+                    "SHARES_CLASS_ISSUED",
+                    "SHARES_CLASS_TREASURY",
+                ],
+            ]
+            .to_dict(
+                orient="records"
+            )
+        )
+
+        raise AccountingDataError(
+            "FAIL-SAFE: outstanding por classe negativo. "
+            f"Casos: {bad[:10]}"
+        )
+
+    classes[
+        "FORMATION_DATE"
+    ] = context.formation_date
+
+    classes[
+        "ACCOUNTING_CUTOFF"
+    ] = context.accounting_cutoff
+
+    classes[
+        "PIT_VALID"
+    ] = True
+
+    classes[
+        "FUTURE_RETURN_USED"
+    ] = False
+
+    classes = classes.drop(
+        columns=[
+            "_PN_CLASS_COUNT",
+        ],
+        errors="ignore",
+    )
+
+    output_columns = [
+        column
+        for column in (
+            "ISSUER_ID",
+            "SHARE_CLASS",
+            "SHARE_SPECIES",
+            "SHARE_SUBCLASS",
+            "SHARES_CLASS_ISSUED",
+            "SHARES_CLASS_TREASURY",
+            "SHARES_CLASS_OUTSTANDING",
+            "SHARE_CLASS_EXACT",
+            "FRE_REFERENCE_DATE",
+            "FRE_VERSION",
+            "FRE_SOURCE_YEAR",
+            "FRE_SOURCE_FILE",
+            "FORMATION_DATE",
+            "ACCOUNTING_CUTOFF",
+            "PIT_VALID",
+            "FUTURE_RETURN_USED",
+        )
+        if column in classes.columns
+    ]
+
+    classes = classes[
+        output_columns
+    ].copy()
+
+    classes = classes.sort_values(
+        [
+            "ISSUER_ID",
+            "SHARE_CLASS",
+        ]
+    ).reset_index(
+        drop=True
+    )
+
+    assert_no_future_information(
+        classes,
+        stage="share_class_data final",
+    )
+
+    return classes
+
 
 
 # =============================================================================
