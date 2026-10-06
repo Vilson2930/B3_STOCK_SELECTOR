@@ -541,6 +541,22 @@ def prepare_turnaround(
         "TURNAROUND_PRODUCTION_AUTHORIZED",
     ]
 
+    # Metadados descritivos já validados e preservados pelo pipeline.
+    # Eles não participam do score; apenas acompanham o emissor até
+    # Risk/Report para tornar a seleção final identificável.
+    for identity_column in (
+        "TICKERS",
+        "COMPANY_NAME",
+        "CNPJ",
+        "CD_CVM",
+        "SECTOR",
+        "SECTOR_BUCKET",
+        "FCA_SETOR_ATIVIDADE",
+        "FINANCIAL_SPECIAL",
+    ):
+        if identity_column in turnaround.columns:
+            columns.append(identity_column)
+
     if (
         "TURNAROUND_RESEARCH_SCORE_COMPLETE"
         in turnaround.columns
@@ -894,7 +910,7 @@ def run_ranking_engine(
 
     result[
         "RANKING_ENGINE_VERSION"
-    ] = "0.2.0"
+    ] = "0.3.0"
 
     result[
         "RANKING_MODEL"
@@ -1137,7 +1153,7 @@ def save_ranking(
             "RANKING_ENGINE",
 
         "version":
-            "0.2.0",
+            "0.3.0",
 
         "created_at_utc":
             _utc_now_iso(),
@@ -1219,6 +1235,8 @@ def _self_test():
     turnaround = pd.DataFrame(
         {
             "ISSUER_ID": ["1", "2", "3"],
+            "TICKERS": ["AAA3", "BBB3", "CCC3"],
+            "COMPANY_NAME": ["Empresa A", "Empresa B", "Empresa C"],
             "TURNAROUND_RESEARCH_SCORE": [0.90, 0.60, 0.20],
             "TURNAROUND_RESEARCH_SCORE_COMPLETE": [0.90, 0.60, 0.20],
             "TURNAROUND_PRODUCTION_AUTHORIZED": [False, False, False],
@@ -1242,6 +1260,16 @@ def _self_test():
     )
 
     indexed = result.set_index("ISSUER_ID")
+
+    if indexed.loc["1", "TICKERS"] != "AAA3":
+        raise RankingError(
+            "SELF-TEST: TICKERS não foi preservado no ranking."
+        )
+
+    if indexed.loc["1", "COMPANY_NAME"] != "Empresa A":
+        raise RankingError(
+            "SELF-TEST: COMPANY_NAME não foi preservado no ranking."
+        )
 
     if not np.isclose(indexed.loc["1", "FINAL_SCORE"], 0.90):
         raise RankingError(
