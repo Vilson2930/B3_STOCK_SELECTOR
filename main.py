@@ -12,6 +12,8 @@
 #      ↓
 # UNIVERSE
 #      ↓
+# SHARE CLASSES (FRE) + MARKET CAP
+#      ↓
 # FUNDAMENTALS
 #      ↓
 # INVESTABILITY
@@ -144,6 +146,245 @@ except ImportError as exc:
     raise RuntimeError(
         "FAIL-SAFE: não foi possível importar engines/universe.py."
     ) from exc
+
+
+# =============================================================================
+# SHARE CLASSES / MARKET CAP
+# =============================================================================
+
+def run_market_cap_stage(
+    security_universe: pd.DataFrame,
+    accounting_data: pd.DataFrame,
+    context: PITContext,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """
+    Constrói a ponte:
+        FRE por classe -> preço B3 por classe -> MARKET_CAP por emissor.
+
+    Retorna:
+        accounting_enriched
+        share_classes
+        issuer_market_cap
+
+    Regras:
+    - não altera o security_universe;
+    - não usa QUATOT como quantidade de ações;
+    - não escolhe preço arbitrário;
+    - não cria MARKET_CAP quando a classe não pode ser casada com segurança;
+    - mantém uma linha contábil por ISSUER_ID.
+    """
+
+    build_share_classes = resolve_callable(
+        accounting_module,
+        (
+            "build_share_class_data",
+        ),
+    )
+
+    calculate_market_cap = resolve_callable(
+        market_module,
+        (
+            "calculate_issuer_market_cap",
+        ),
+    )
+
+    share_classes = call_stage(
+        "SHARE_CLASSES_FRE",
+        build_share_classes,
+        [
+            (
+                (),
+                {
+                    "formation_date": context.formation_date,
+                    "accounting_cutoff": context.accounting_cutoff,
+                },
+            ),
+            (
+                (
+                    context.formation_date,
+                    context.accounting_cutoff,
+                ),
+                {},
+            ),
+        ],
+    )
+
+    require_dataframe(
+        share_classes,
+        "SHARE_CLASSES_FRE",
+    )
+
+    assert_no_future_information(
+        share_classes,
+        "SHARE_CLASSES_FRE",
+    )
+
+    # accounting.py usa SHARE_CLASS.
+    # market.py usa SECURITY_CLASS.
+    # A conversão é explícita e local; nenhuma classe é inferida aqui.
+    if (
+        "SHARE_CLASS" in share_classes.columns
+        and "SECURITY_CLASS" not in share_classes.columns
+    ):
+        share_classes_for_market = (
+            share_classes.rename(
+                columns={
+                    "SHARE_CLASS": "SECURITY_CLASS",
+                }
+            )
+        )
+    else:
+        share_classes_for_market = (
+            share_classes.copy()
+        )
+
+    required_share_columns = {
+        "ISSUER_ID",
+        "SECURITY_CLASS",
+        "SHARES_CLASS_OUTSTANDING",
+    }
+
+    missing_share_columns = (
+        required_share_columns
+        - set(share_classes_for_market.columns)
+    )
+
+    if missing_share_columns:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: SHARE_CLASSES_FRE sem colunas "
+            f"necessárias ao MARKET_CAP: {sorted(missing_share_columns)}"
+        )
+
+    market_cap_result = call_stage(
+        "MARKET_CAP",
+        calculate_market_cap,
+        [
+            (
+                (),
+                {
+                    "security_universe": security_universe,
+                    "share_classes": share_classes_for_market,
+                },
+            ),
+            (
+                (
+                    security_universe,
+                    share_classes_for_market,
+                ),
+                {},
+            ),
+        ],
+    )
+
+    if (
+        not isinstance(market_cap_result, tuple)
+        or len(market_cap_result) != 2
+    ):
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: calculate_issuer_market_cap deve retornar "
+            "(issuer_market_cap, class_detail)."
+        )
+
+    issuer_market_cap, class_detail = (
+        market_cap_result
+    )
+
+    require_dataframe(
+        issuer_market_cap,
+        "ISSUER_MARKET_CAP",
+    )
+
+    # class_detail pode estar vazio quando nenhuma classe consegue ser
+    # casada com segurança. Isso não autoriza inventar MARKET_CAP.
+    if not isinstance(
+        class_detail,
+        pd.DataFrame,
+    ):
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: MARKET_CAP class_detail não é DataFrame."
+        )
+
+    required_market_cap_columns = {
+        "ISSUER_ID",
+        "MARKET_CAP",
+        "MARKET_CAP_VALID",
+        "MARKET_CAP_STATUS",
+    }
+
+    missing_market_cap_columns = (
+        required_market_cap_columns
+        - set(issuer_market_cap.columns)
+    )
+
+    if missing_market_cap_columns:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ISSUER_MARKET_CAP sem colunas: "
+            f"{sorted(missing_market_cap_columns)}"
+        )
+
+    if issuer_market_cap[
+        "ISSUER_ID"
+    ].duplicated().any():
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ISSUER_MARKET_CAP possui emissor duplicado."
+        )
+
+    if "ISSUER_ID" not in accounting_data.columns:
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ACCOUNTING_DATA sem ISSUER_ID."
+        )
+
+    if accounting_data[
+        "ISSUER_ID"
+    ].duplicated().any():
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: ACCOUNTING_DATA possui emissor duplicado "
+            "antes do MARKET_CAP."
+        )
+
+    # Não propaga MARKET_VALUE para a base contábil: valuation.py já sabe
+    # construir MARKET_VALUE a partir de MARKET_CAP. Mantemos uma única
+    # fonte canônica para evitar conflito de colunas.
+    merge_columns = [
+        column
+        for column in (
+            "ISSUER_ID",
+            "MARKET_CAP",
+            "MARKET_CAP_VALID",
+            "MARKET_CAP_STATUS",
+            "MARKET_CAP_N_CLASSES",
+            "MARKET_CAP_SOURCE",
+        )
+        if column in issuer_market_cap.columns
+    ]
+
+    accounting_enriched = (
+        accounting_data.merge(
+            issuer_market_cap[
+                merge_columns
+            ],
+            on="ISSUER_ID",
+            how="left",
+            validate="one_to_one",
+        )
+    )
+
+    if len(accounting_enriched) != len(accounting_data):
+        raise PipelineIntegrityError(
+            "FAIL-SAFE: MARKET_CAP alterou a cardinalidade "
+            "da base contábil."
+        )
+
+    assert_no_future_information(
+        accounting_enriched,
+        "ACCOUNTING_WITH_MARKET_CAP",
+    )
+
+    return (
+        accounting_enriched,
+        share_classes,
+        issuer_market_cap,
+    )
 
 
 # =============================================================================
@@ -1520,6 +1761,25 @@ def run_pipeline(
     )
 
     # -------------------------------------------------------------------------
+    # SHARE CLASSES (FRE) / MARKET CAP
+    #
+    # O valor de mercado é calculado por classe de ação:
+    # preço da classe no COTAHIST x quantidade outstanding da classe no FRE,
+    # somado por emissor. A base enriquecida segue para Fundamentals e,
+    # consequentemente, para Valuation.
+    # -------------------------------------------------------------------------
+
+    (
+        accounting_data,
+        share_classes,
+        issuer_market_cap,
+    ) = run_market_cap_stage(
+        security_universe=security_universe,
+        accounting_data=accounting_data,
+        context=context,
+    )
+
+    # -------------------------------------------------------------------------
     # FUNDAMENTALS
     #
     # O Fundamental Engine transforma a base contábil PIT em indicadores.
@@ -1846,6 +2106,12 @@ def run_pipeline(
         "issuer_universe":
             issuer_universe,
 
+        "share_classes":
+            share_classes,
+
+        "issuer_market_cap":
+            issuer_market_cap,
+
         "investability":
             investability,
 
@@ -2150,7 +2416,8 @@ if __name__ == "__main__":
         print()
         print(
             "Pipeline: PIT → MARKET → ACCOUNTING → UNIVERSE → "
-            "FUNDAMENTALS → INVESTABILITY → QUALITY / TURNAROUND / "
+            "FRE/CLASSES → MARKET_CAP → FUNDAMENTALS → INVESTABILITY → "
+            "QUALITY / TURNAROUND / "
             "VALUATION → RANKING → RISK → REPORT"
         )
         print()
