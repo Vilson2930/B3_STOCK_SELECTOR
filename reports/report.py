@@ -18,7 +18,7 @@
 # - Quality;
 # - Valuation;
 # - controles de risco;
-# - Turnaround apenas como informação de pesquisa;
+# - modelo fundamental 50/30/20 e sua proveniência;
 # - motivos de exclusão;
 # - alertas metodológicos.
 #
@@ -29,7 +29,7 @@
 # - alterar pesos;
 # - descobrir fatores;
 # - usar retorno futuro;
-# - liberar Turnaround experimental.
+# - liberar modelo diferente do 50/30/20 autorizado.
 #
 # PRINCÍPIO:
 # O relatório descreve exatamente o que os motores decidiram.
@@ -400,17 +400,115 @@ def prepare_risk_result(
         )
 
         if used.any():
-            raise ReportIntegrityError(
-                "FAIL-SAFE: Turnaround Research "
-                "entrou no ranking."
+
+            required_study_columns = {
+                "RANKING_MODEL",
+                "MARGEM_BRUTA_WEIGHT",
+                "MARGEM_LIQUIDA_WEIGHT",
+                "ROE_WEIGHT",
+            }
+
+            missing = (
+                required_study_columns
+                - set(result.columns)
             )
+
+            if missing:
+                raise ReportIntegrityError(
+                    "FAIL-SAFE: score do estudo entrou no relatório "
+                    "sem metadados obrigatórios: "
+                    f"{sorted(missing)}"
+                )
+
+            models = (
+                result.loc[
+                    used,
+                    "RANKING_MODEL",
+                ]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .unique()
+                .tolist()
+            )
+
+            if models != [
+                "MB_50_ML_30_ROE_20_STUDY"
+            ]:
+                raise ReportIntegrityError(
+                    "FAIL-SAFE: modelo fundamental não autorizado "
+                    f"no relatório: {models}"
+                )
+
+            expected_weights = {
+                "MARGEM_BRUTA_WEIGHT": 0.50,
+                "MARGEM_LIQUIDA_WEIGHT": 0.30,
+                "ROE_WEIGHT": 0.20,
+            }
+
+            for column, expected in expected_weights.items():
+
+                values = pd.to_numeric(
+                    result.loc[
+                        used,
+                        column,
+                    ],
+                    errors="coerce",
+                )
+
+                if values.isna().any():
+                    raise ReportIntegrityError(
+                        "FAIL-SAFE: peso ausente/inválido "
+                        f"no relatório: {column}"
+                    )
+
+                if not np.isclose(
+                    values.to_numpy(dtype=float),
+                    expected,
+                    atol=1e-12,
+                    rtol=0.0,
+                ).all():
+                    raise ReportIntegrityError(
+                        "FAIL-SAFE: peso divergente do estudo "
+                        f"no relatório: {column}; "
+                        f"esperado={expected}."
+                    )
+
+            for column in (
+                "QUALITY_WEIGHT",
+                "VALUATION_WEIGHT",
+            ):
+
+                if column in result.columns:
+
+                    values = pd.to_numeric(
+                        result.loc[
+                            used,
+                            column,
+                        ],
+                        errors="coerce",
+                    )
+
+                    if (
+                        values.isna().any()
+                        or not np.isclose(
+                            values.to_numpy(dtype=float),
+                            0.0,
+                            atol=1e-12,
+                            rtol=0.0,
+                        ).all()
+                    ):
+                        raise ReportIntegrityError(
+                            "FAIL-SAFE: peso legado diferente "
+                            f"de zero no relatório: {column}."
+                        )
 
     if (
         "TURNAROUND_RESEARCH_USED_RISK"
         in result.columns
     ):
 
-        used = (
+        used_risk = (
             result[
                 "TURNAROUND_RESEARCH_USED_RISK"
             ]
@@ -418,10 +516,12 @@ def prepare_risk_result(
             .astype(bool)
         )
 
-        if used.any():
+        # O Risk pode transportar o score já produzido pelo Ranking,
+        # mas não pode recalcular/utilizar Turnaround de forma independente.
+        if used_risk.any():
             raise ReportIntegrityError(
-                "FAIL-SAFE: Turnaround Research "
-                "entrou no Risk Engine."
+                "FAIL-SAFE: Turnaround foi utilizado "
+                "independentemente pelo Risk Engine."
             )
 
     return result
@@ -542,9 +642,9 @@ def build_portfolio_table(
     optional = (
         "FINAL_RANK",
         "FINAL_SCORE",
+        "TURNAROUND_RESEARCH_SCORE",
         "QUALITY_SCORE",
         "VALUATION_SCORE",
-        "TURNAROUND_RESEARCH_SCORE",
         "TURNAROUND_RESEARCH_STATUS",
         "GROSS_MARGIN_ZONE",
         "PORTFOLIO_WEIGHT",
@@ -875,6 +975,12 @@ def build_turnaround_research_summary(
         "production_authorized": False,
         "used_in_final_ranking": False,
         "used_in_risk": False,
+        "model": None,
+        "weights": {
+            "MARGEM_BRUTA": 0.50,
+            "MARGEM_LIQUIDA": 0.30,
+            "ROE": 0.20,
+        },
         "status_distribution": {},
         "gross_margin_zone_distribution": {},
     }
@@ -913,6 +1019,27 @@ def build_turnaround_research_summary(
             .astype(bool)
             .any()
         )
+
+        if (
+            summary["used_in_final_ranking"]
+            and "RANKING_MODEL" in result.columns
+        ):
+            models = (
+                result.loc[
+                    result[
+                        "TURNAROUND_RESEARCH_USED_IN_RANKING"
+                    ]
+                    .fillna(False)
+                    .astype(bool),
+                    "RANKING_MODEL",
+                ]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            if len(models) == 1:
+                summary["model"] = models[0]
 
     if (
         "TURNAROUND_RESEARCH_USED_RISK"
@@ -997,16 +1124,17 @@ def build_methodology_notes(
 
     notes = [
         (
-            "O ranking atual utiliza a arquitetura de referência "
-            "Quality + Valuation."
+            "O ranking operacional utiliza o modelo do estudo: "
+            "50% Margem Bruta, 30% Margem Líquida e 20% ROE, "
+            "todos com direção LOW."
         ),
         (
-            "Os pesos do ranking não representam nova conclusão "
-            "científica deste estudo."
+            "Quality e Valuation podem permanecer no relatório como "
+            "informação auxiliar, mas não recebem peso no score principal."
         ),
         (
-            "O Turnaround Engine permanece uma camada de pesquisa "
-            "enquanto não houver validação temporal independente suficiente."
+            "O Report Engine não recalcula nem altera o score 50/30/20; "
+            "apenas valida e descreve o resultado recebido."
         ),
         (
             "Margem bruta baixa não constitui isoladamente "
@@ -1071,7 +1199,7 @@ def build_report(
                 VERSION,
 
             "report_engine_version":
-                "0.1.0",
+                "0.2.0",
 
             "created_at_utc":
                 _utc_now_iso(),
@@ -1469,12 +1597,21 @@ Maior posição
 </tbody>
 </table>
 
-<h2>Turnaround / Assimetria</h2>
+<h2>Modelo fundamental do estudo</h2>
 
 <div class="research">
 
 <strong>Status:</strong>
-PESQUISA<br><br>
+OPERACIONAL COM FAIL-SAFE<br><br>
+
+<strong>Modelo:</strong>
+{turnaround["model"] or "MB_50_ML_30_ROE_20_STUDY"}<br>
+
+<strong>Pesos:</strong>
+Margem Bruta 50% / Margem Líquida 30% / ROE 20%<br>
+
+<strong>Direção:</strong>
+LOW para os três fatores<br>
 
 <strong>Produção autorizada:</strong>
 {turnaround["production_authorized"]}<br>
@@ -1482,12 +1619,10 @@ PESQUISA<br><br>
 <strong>Usado no ranking:</strong>
 {turnaround["used_in_final_ranking"]}<br>
 
-<strong>Usado no risco:</strong>
+<strong>Recalculado pelo Risk:</strong>
 {turnaround["used_in_risk"]}<br><br>
 
-O principal sinal candidato permanece a posição relativa
-da margem bruta. Esse sinal não constitui recomendação
-de compra e permanece separado da decisão operacional.
+O relatório não recalcula o modelo e não utiliza retorno futuro.
 
 </div>
 
@@ -1625,7 +1760,27 @@ def save_report(
         "future_return_used":
             False,
 
-        "turnaround_research_used_in_decision":
+        "study_model":
+            "MB_50_ML_30_ROE_20_STUDY",
+
+        "study_weights": {
+            "MARGEM_BRUTA": 0.50,
+            "MARGEM_LIQUIDA": 0.30,
+            "ROE": 0.20,
+        },
+
+        "study_model_used_in_ranking":
+            bool(
+                result.get(
+                    "TURNAROUND_RESEARCH_USED_IN_RANKING",
+                    pd.Series(False, index=result.index),
+                )
+                .fillna(False)
+                .astype(bool)
+                .any()
+            ),
+
+        "turnaround_recalculated_by_report":
             False,
 
         "portfolio_positions":
@@ -1749,15 +1904,51 @@ def _self_test():
             ],
 
             "TURNAROUND_PRODUCTION_AUTHORIZED": [
-                False,
-                False,
-                False,
+                True,
+                True,
+                True,
             ],
 
             "TURNAROUND_RESEARCH_USED_IN_RANKING": [
-                False,
-                False,
-                False,
+                True,
+                True,
+                True,
+            ],
+
+            "RANKING_MODEL": [
+                "MB_50_ML_30_ROE_20_STUDY",
+                "MB_50_ML_30_ROE_20_STUDY",
+                "MB_50_ML_30_ROE_20_STUDY",
+            ],
+
+            "MARGEM_BRUTA_WEIGHT": [
+                0.50,
+                0.50,
+                0.50,
+            ],
+
+            "MARGEM_LIQUIDA_WEIGHT": [
+                0.30,
+                0.30,
+                0.30,
+            ],
+
+            "ROE_WEIGHT": [
+                0.20,
+                0.20,
+                0.20,
+            ],
+
+            "QUALITY_WEIGHT": [
+                0.0,
+                0.0,
+                0.0,
+            ],
+
+            "VALUATION_WEIGHT": [
+                0.0,
+                0.0,
+                0.0,
             ],
 
             "TURNAROUND_RESEARCH_USED_RISK": [
@@ -1830,7 +2021,7 @@ def _self_test():
             "SELF-TEST: quantidade selecionada incorreta."
         )
 
-    if (
+    if not (
         report[
             "turnaround_research"
         ][
@@ -1839,8 +2030,38 @@ def _self_test():
     ):
 
         raise ReportError(
-            "SELF-TEST: Turnaround Research "
-            "entrou no ranking."
+            "SELF-TEST: modelo 50/30/20 autorizado "
+            "não foi preservado no relatório."
+        )
+
+    if (
+        report[
+            "turnaround_research"
+        ][
+            "model"
+        ]
+        != "MB_50_ML_30_ROE_20_STUDY"
+    ):
+
+        raise ReportError(
+            "SELF-TEST: modelo do estudo incorreto no relatório."
+        )
+
+    contaminated = sample.copy()
+    contaminated["ROE_WEIGHT"] = 0.25
+
+    blocked = False
+
+    try:
+        prepare_risk_result(
+            contaminated
+        )
+    except ReportIntegrityError:
+        blocked = True
+
+    if not blocked:
+        raise ReportError(
+            "SELF-TEST: peso divergente do estudo não foi bloqueado."
         )
 
     portfolio = build_portfolio_table(
@@ -1890,10 +2111,11 @@ if __name__ == "__main__":
 
     print("Self-test: OK")
     print("Carteira: REPORTADA")
-    print("Quality: REPORTADO")
-    print("Valuation: REPORTADO")
+    print("Modelo 50/30/20: REPORTADO E VALIDADO")
+    print("Quality: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
+    print("Valuation: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
     print("Risk: REPORTADO")
-    print("Turnaround: SOMENTE PESQUISA")
+    print("Turnaround recalculado pelo Report: NÃO")
     print("Retorno futuro: NÃO UTILIZADO")
     print("Decisões recalculadas no relatório: NÃO")
     print("JSON: SUPORTADO")
