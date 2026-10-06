@@ -281,6 +281,21 @@ jobs:
           echo "============================================================"
 
       # =======================================================================
+      # ENVIO DO RELATÓRIO POR E-MAIL
+      # Executa somente após pipeline e validação dos outputs concluírem com sucesso.
+      # As credenciais permanecem exclusivamente nos GitHub Secrets.
+      # =======================================================================
+
+      - name: Send report by Gmail
+        if: success()
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          python -m reports.email_report
+
+      # =======================================================================
       # UPLOAD DOS RESULTADOS
       # =======================================================================
 
