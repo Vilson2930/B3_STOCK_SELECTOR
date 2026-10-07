@@ -18,7 +18,7 @@
 # - Quality;
 # - Valuation;
 # - controles de risco;
-# - modelo fundamental 50/30/20 e sua proveniência;
+# - modelo fundamental MB 100% e sua proveniência;
 # - motivos de exclusão;
 # - alertas metodológicos.
 #
@@ -29,7 +29,7 @@
 # - alterar pesos;
 # - descobrir fatores;
 # - usar retorno futuro;
-# - liberar modelo diferente do 50/30/20 autorizado.
+# - liberar modelo diferente do MB 100% autorizado.
 #
 # PRINCÍPIO:
 # O relatório descreve exatamente o que os motores decidiram.
@@ -433,7 +433,7 @@ def prepare_risk_result(
             )
 
             if models != [
-                "MB_50_ML_30_ROE_20_STUDY"
+                "MB_100_STUDY"
             ]:
                 raise ReportIntegrityError(
                     "FAIL-SAFE: modelo fundamental não autorizado "
@@ -441,9 +441,9 @@ def prepare_risk_result(
                 )
 
             expected_weights = {
-                "MARGEM_BRUTA_WEIGHT": 0.50,
-                "MARGEM_LIQUIDA_WEIGHT": 0.30,
-                "ROE_WEIGHT": 0.20,
+                "MARGEM_BRUTA_WEIGHT": 1.00,
+                "MARGEM_LIQUIDA_WEIGHT": 0.00,
+                "ROE_WEIGHT": 0.00,
             }
 
             for column, expected in expected_weights.items():
@@ -977,9 +977,9 @@ def build_turnaround_research_summary(
         "used_in_risk": False,
         "model": None,
         "weights": {
-            "MARGEM_BRUTA": 0.50,
-            "MARGEM_LIQUIDA": 0.30,
-            "ROE": 0.20,
+            "MARGEM_BRUTA": 1.00,
+            "MARGEM_LIQUIDA": 0.00,
+            "ROE": 0.00,
         },
         "status_distribution": {},
         "gross_margin_zone_distribution": {},
@@ -1125,7 +1125,7 @@ def build_methodology_notes(
     notes = [
         (
             "O ranking operacional utiliza o modelo do estudo: "
-            "50% Margem Bruta, 30% Margem Líquida e 20% ROE, "
+            "100% Margem Bruta, com Margem Líquida e ROE sem peso, "
             "todos com direção LOW."
         ),
         (
@@ -1133,7 +1133,7 @@ def build_methodology_notes(
             "informação auxiliar, mas não recebem peso no score principal."
         ),
         (
-            "O Report Engine não recalcula nem altera o score 50/30/20; "
+            "O Report Engine não recalcula nem altera o score MB 100%; "
             "apenas valida e descreve o resultado recebido."
         ),
         (
@@ -1605,13 +1605,13 @@ Maior posição
 OPERACIONAL COM FAIL-SAFE<br><br>
 
 <strong>Modelo:</strong>
-{turnaround["model"] or "MB_50_ML_30_ROE_20_STUDY"}<br>
+{turnaround["model"] or "MB_100_STUDY"}<br>
 
 <strong>Pesos:</strong>
-Margem Bruta 50% / Margem Líquida 30% / ROE 20%<br>
+Margem Bruta 100% / Margem Líquida 0% / ROE 0%<br>
 
 <strong>Direção:</strong>
-LOW para os três fatores<br>
+LOW para Margem Bruta; Margem Líquida e ROE sem peso no score<br>
 
 <strong>Produção autorizada:</strong>
 {turnaround["production_authorized"]}<br>
@@ -1761,12 +1761,12 @@ def save_report(
             False,
 
         "study_model":
-            "MB_50_ML_30_ROE_20_STUDY",
+            "MB_100_STUDY",
 
         "study_weights": {
-            "MARGEM_BRUTA": 0.50,
-            "MARGEM_LIQUIDA": 0.30,
-            "ROE": 0.20,
+            "MARGEM_BRUTA": 1.00,
+            "MARGEM_LIQUIDA": 0.00,
+            "ROE": 0.00,
         },
 
         "study_model_used_in_ranking":
@@ -1916,27 +1916,27 @@ def _self_test():
             ],
 
             "RANKING_MODEL": [
-                "MB_50_ML_30_ROE_20_STUDY",
-                "MB_50_ML_30_ROE_20_STUDY",
-                "MB_50_ML_30_ROE_20_STUDY",
+                "MB_100_STUDY",
+                "MB_100_STUDY",
+                "MB_100_STUDY",
             ],
 
             "MARGEM_BRUTA_WEIGHT": [
-                0.50,
-                0.50,
-                0.50,
+                1.00,
+                1.00,
+                1.00,
             ],
 
             "MARGEM_LIQUIDA_WEIGHT": [
-                0.30,
-                0.30,
-                0.30,
+                0.00,
+                0.00,
+                0.00,
             ],
 
             "ROE_WEIGHT": [
-                0.20,
-                0.20,
-                0.20,
+                0.00,
+                0.00,
+                0.00,
             ],
 
             "QUALITY_WEIGHT": [
@@ -2030,7 +2030,7 @@ def _self_test():
     ):
 
         raise ReportError(
-            "SELF-TEST: modelo 50/30/20 autorizado "
+            "SELF-TEST: modelo MB 100% autorizado "
             "não foi preservado no relatório."
         )
 
@@ -2040,7 +2040,7 @@ def _self_test():
         ][
             "model"
         ]
-        != "MB_50_ML_30_ROE_20_STUDY"
+        != "MB_100_STUDY"
     ):
 
         raise ReportError(
@@ -2048,7 +2048,7 @@ def _self_test():
         )
 
     contaminated = sample.copy()
-    contaminated["ROE_WEIGHT"] = 0.25
+    contaminated["MARGEM_BRUTA_WEIGHT"] = 0.95
 
     blocked = False
 
@@ -2111,7 +2111,7 @@ if __name__ == "__main__":
 
     print("Self-test: OK")
     print("Carteira: REPORTADA")
-    print("Modelo 50/30/20: REPORTADO E VALIDADO")
+    print("Modelo MB 100%: REPORTADO E VALIDADO")
     print("Quality: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
     print("Valuation: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
     print("Risk: REPORTADO")
