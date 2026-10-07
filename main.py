@@ -31,7 +31,7 @@
 # REGRAS:
 # - sem look-ahead;
 # - retorno futuro proibido;
-# - somente o modelo do estudo 50/30/20 autorizado pode entrar no ranking;
+# - somente o modelo do estudo MB 100% autorizado pode entrar no ranking;
 # - uma empresa = um emissor na análise fundamental;
 # - execução determinística;
 # - fail-safe;
@@ -1792,7 +1792,7 @@ def run_pipeline(
     # - somente campos descritivos, nunca fatores/scoring;
     # - cardinalidade one_to_one obrigatória;
     # - não sobrescreve coluna já existente na base contábil;
-    # - não altera o modelo 50/30/20;
+    # - não altera o modelo MB 100%;
     # - não introduz informação futura.
     # -------------------------------------------------------------------------
 
@@ -1976,7 +1976,7 @@ def run_pipeline(
             "FAIL-SAFE: retorno futuro utilizado."
         )
 
-    # O score 50/30/20 do estudo pode entrar no Ranking quando sua
+    # O score MB 100% do estudo pode entrar no Ranking quando sua
     # integridade já foi validada pelo Ranking Engine e pelo Risk Engine.
     # O main não recalcula o modelo; apenas confirma os metadados finais.
     if audit[
@@ -2021,16 +2021,16 @@ def run_pipeline(
             .tolist()
         )
 
-        if models != ["MB_50_ML_30_ROE_20_STUDY"]:
+        if models != ["MB_100_STUDY"]:
             raise PipelineIntegrityError(
                 "FAIL-SAFE: modelo fundamental não autorizado "
                 f"detectado no ranking: {models}"
             )
 
         expected_weights = {
-            "MARGEM_BRUTA_WEIGHT": 0.50,
-            "MARGEM_LIQUIDA_WEIGHT": 0.30,
-            "ROE_WEIGHT": 0.20,
+            "MARGEM_BRUTA_WEIGHT": 1.00,
+            "MARGEM_LIQUIDA_WEIGHT": 0.00,
+            "ROE_WEIGHT": 0.00,
         }
 
         for column, expected in expected_weights.items():
