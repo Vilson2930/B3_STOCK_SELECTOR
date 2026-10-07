@@ -10,7 +10,7 @@
 # IMPORTANTE:
 # - retorno futuro jamais entra como variável;
 # - o ranking final representa exclusivamente o modelo fundamental do estudo;
-# - score do estudo: 50% Margem Bruta + 30% Margem Líquida + 20% ROE;
+# - score operacional: 100% Margem Bruta LOW; Margem Líquida e ROE ficam em auditoria;
 # - todos os três fatores possuem direção LOW;
 # - Quality e Valuation não recebem peso no score principal;
 # - execução é determinística e auditável.
@@ -126,9 +126,9 @@ class RankingAuthorizationError(RankingError):
 #
 # Evidência utilizada pelo robô:
 #
-# Margem Bruta   50%
-# Margem Líquida 30%
-# ROE             20%
+# Margem Bruta   100%
+# Margem Líquida   0% (auditoria)
+# ROE               0% (auditoria)
 #
 # Todos os fatores têm direção LOW: valores relativamente menores recebem
 # maior score cross-sectional. Os pesos refletem a hipótese operacional
@@ -139,9 +139,9 @@ class RankingAuthorizationError(RankingError):
 # =============================================================================
 
 STUDY_WEIGHTS = {
-    "MARGEM_BRUTA": 0.50,
-    "MARGEM_LIQUIDA": 0.30,
-    "ROE": 0.20,
+    "MARGEM_BRUTA": 1.00,
+    "MARGEM_LIQUIDA": 0.00,
+    "ROE": 0.00,
 }
 
 
@@ -807,7 +807,7 @@ def calculate_final_score(
     if not eligible.any():
         return result
 
-    # O Turnaround Engine já calcula o score 50/30/20 com direção LOW.
+    # O Turnaround Engine já calcula o score 100% Margem Bruta com direção LOW.
     # Aqui não recalculamos percentis nem fatores: apenas promovemos
     # exatamente esse score para FINAL_SCORE.
     study_score = validate_score(
@@ -914,7 +914,7 @@ def run_ranking_engine(
 
     result[
         "RANKING_MODEL"
-    ] = "MB_50_ML_30_ROE_20_STUDY"
+    ] = "MB_100_STUDY"
 
     result["MARGEM_BRUTA_WEIGHT"] = weights["MARGEM_BRUTA"]
     result["MARGEM_LIQUIDA_WEIGHT"] = weights["MARGEM_LIQUIDA"]
@@ -1062,7 +1062,7 @@ def audit_ranking(
         "status": "OK",
 
         "model":
-            "MB_50_ML_30_ROE_20_STUDY",
+            "MB_100_STUDY",
 
         "issuers_total":
             int(len(result)),
@@ -1241,9 +1241,9 @@ def _self_test():
             "TURNAROUND_RESEARCH_SCORE_COMPLETE": [0.90, 0.60, 0.20],
             "TURNAROUND_PRODUCTION_AUTHORIZED": [False, False, False],
             "TURNAROUND_SCORE_MODEL": [
-                "MB_50_ML_30_ROE_20_RESEARCH",
-                "MB_50_ML_30_ROE_20_RESEARCH",
-                "MB_50_ML_30_ROE_20_RESEARCH",
+                "MB_100_RESEARCH",
+                "MB_100_RESEARCH",
+                "MB_100_RESEARCH",
             ],
         }
     )
@@ -1278,7 +1278,7 @@ def _self_test():
 
     if int(indexed.loc["1", "FINAL_RANK"]) != 1:
         raise RankingError(
-            "SELF-TEST: ranking não respeitou o score 50/30/20."
+            "SELF-TEST: ranking não respeitou o score MB 100%."
         )
 
     # Quality/Valuation inválidos não podem bloquear uma empresa que possua
@@ -1340,7 +1340,7 @@ if __name__ == "__main__":
     weights = resolve_engine_weights()
 
     print("Self-test: OK")
-    print("Modelo principal: ESTUDO FUNDAMENTAL 50/30/20")
+    print("Modelo principal: MARGEM BRUTA LOW 100%")
     print("Quality no score principal: 0%")
     print("Valuation no score principal: 0%")
     print("Retorno futuro: PROIBIDO")
