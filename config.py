@@ -137,7 +137,7 @@ TURNAROUND_ENGINE = {
 
     # O engine contém o score operacional derivado do estudo.
     # A autorização abaixo refere-se especificamente ao uso do modelo
-    # 50/30/20 no ranking deste robô, sem retorno futuro.
+    # 100% Margem Bruta LOW no ranking deste robô, sem retorno futuro.
     "production_authorized": True,
 
     "status": "STUDY_OPERATIONAL_MODEL",
@@ -151,17 +151,17 @@ TURNAROUND_ENGINE = {
         "ROE",
     ],
 
-    "validated_rule": "MB_50_ML_30_ROE_20",
+    "validated_rule": "MB_100",
 
     "study_weights": {
-        "MARGEM_BRUTA": 0.50,
-        "MARGEM_LIQUIDA": 0.30,
-        "ROE": 0.20,
+        "MARGEM_BRUTA": 1.00,
+        "MARGEM_LIQUIDA": 0.00,
+        "ROE": 0.00,
     },
 
     "description": (
-        "Score fundamental do estudo: Margem Bruta 50%, "
-        "Margem Líquida 30% e ROE 20%, todos com direção LOW."
+        "Score operacional: Margem Bruta LOW 100%. "
+        "Margem Líquida e ROE permanecem apenas para auditoria, com peso zero."
     ),
 }
 
@@ -279,12 +279,12 @@ VALUATION_ENGINE = {
 RANKING_ENGINE = {
 
     # O ranking deste robô usa exclusivamente o modelo definido pelo estudo.
-    "model": "MB_50_ML_30_ROE_20_STUDY",
+    "model": "MB_100_STUDY",
 
     "study_weights": {
-        "MARGEM_BRUTA": 0.50,
-        "MARGEM_LIQUIDA": 0.30,
-        "ROE": 0.20,
+        "MARGEM_BRUTA": 1.00,
+        "MARGEM_LIQUIDA": 0.00,
+        "ROE": 0.00,
     },
 
     # Não definir engine_weights: Quality/Valuation não entram no score.
@@ -396,19 +396,19 @@ def validate_config():
         )
 
     expected_weights = {
-        "MARGEM_BRUTA": 0.50,
-        "MARGEM_LIQUIDA": 0.30,
-        "ROE": 0.20,
+        "MARGEM_BRUTA": 1.00,
+        "MARGEM_LIQUIDA": 0.00,
+        "ROE": 0.00,
     }
 
     if RANKING_ENGINE.get("study_weights") != expected_weights:
         raise RuntimeError(
-            "FAIL-SAFE: pesos do ranking divergentes do modelo 50/30/20."
+            "FAIL-SAFE: pesos do ranking divergentes do modelo MB 100%."
         )
 
     if TURNAROUND_ENGINE.get("study_weights") != expected_weights:
         raise RuntimeError(
-            "FAIL-SAFE: pesos do Turnaround divergentes do modelo 50/30/20."
+            "FAIL-SAFE: pesos do Turnaround divergentes do modelo MB 100%."
         )
 
     if "engine_weights" in RANKING_ENGINE:
@@ -438,8 +438,8 @@ if __name__ == "__main__":
     print("Retorno futuro no ranking: NÃO")
 
     print("Modelo operacional do estudo: SIM")
-    print("Ranking: 50% Margem Bruta / 30% Margem Líquida / 20% ROE")
-    print("Direção dos três fatores: LOW")
+    print("Ranking: 100% Margem Bruta LOW")
+    print("Fator operacional: Margem Bruta LOW; Margem Líquida/ROE apenas auditoria")
     print("Quality no score principal: NÃO")
     print("Valuation no score principal: NÃO")
 
