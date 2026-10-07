@@ -6,9 +6,9 @@
 #
 # SCORE FUNDAMENTAL DO ESTUDO:
 #
-#   MARGEM_BRUTA    = 50%
-#   MARGEM_LIQUIDA  = 30%
-#   ROE             = 20%
+#   MARGEM_BRUTA    = 100%
+#   MARGEM_LIQUIDA  = 0% (auditoria)
+#   ROE             = 0% (auditoria)
 #
 # Todos com direção LOW.
 #
@@ -70,27 +70,27 @@ RESEARCH_FACTORS = {
         "direction": "LOW",
         "role": "PRIMARY",
         "status": "CANDIDATE",
-        "weight": 0.50,
+        "weight": 1.00,
     },
     "MARGEM_LIQUIDA": {
         "direction": "LOW",
         "role": "SECONDARY",
         "status": "RECURRENT_SIGNAL",
-        "weight": 0.30,
+        "weight": 0.00,
     },
     "ROE": {
         "direction": "LOW",
         "role": "SECONDARY",
         "status": "WEAK_RECURRENT_SIGNAL",
-        "weight": 0.20,
+        "weight": 0.00,
     },
 }
 
 
 RESEARCH_WEIGHTS = {
-    "MARGEM_BRUTA": 0.50,
-    "MARGEM_LIQUIDA": 0.30,
-    "ROE": 0.20,
+    "MARGEM_BRUTA": 1.00,
+    "MARGEM_LIQUIDA": 0.00,
+    "ROE": 0.00,
 }
 
 
@@ -452,7 +452,7 @@ def calculate_safety_context(
 
 
 # =============================================================================
-# SCORE EXPERIMENTAL 50 / 30 / 20
+# SCORE OPERACIONAL — 100% MARGEM BRUTA LOW
 # =============================================================================
 
 def calculate_experimental_score(
@@ -506,8 +506,8 @@ def calculate_experimental_score(
     # NÃO IMPUTAMOS FATOR AUSENTE.
     #
     # O peso é renormalizado somente entre fatores disponíveis.
-    # Porém o score só é considerado válido quando todos os três fatores
-    # estiverem disponíveis. Assim não alteramos silenciosamente a regra.
+    # O score é válido quando a cobertura dos fatores com peso positivo chega a 100%.
+    # Margem Líquida e ROE têm peso zero e permanecem apenas para auditoria.
     # -------------------------------------------------------------------------
 
     score = pd.Series(
@@ -707,10 +707,10 @@ def run_turnaround_engine(
                 "FAIL-SAFE: regra validada ausente."
             )
 
-        if validated_rule != "MB_50_ML_30_ROE_20":
+        if validated_rule != "MB_100":
             raise TurnaroundProductionError(
                 "FAIL-SAFE: regra operacional divergente do modelo "
-                "MB_50_ML_30_ROE_20."
+                "MB_100."
             )
 
         configured_weights = TURNAROUND_ENGINE.get(
@@ -721,7 +721,7 @@ def run_turnaround_engine(
         if configured_weights != RESEARCH_WEIGHTS:
             raise TurnaroundProductionError(
                 "FAIL-SAFE: pesos configurados divergem do modelo "
-                "50/30/20 implementado."
+                "MB 100% implementado."
             )
 
         result[
@@ -750,7 +750,7 @@ def run_turnaround_engine(
     result[
         "TURNAROUND_SCORE_MODEL"
     ] = (
-        "MB_50_ML_30_ROE_20_STUDY"
+        "MB_100_STUDY"
     )
 
     result[
@@ -857,7 +857,7 @@ def audit_turnaround(
             else "RESEARCH_ONLY"
         ),
         "score_model":
-            "MB_50_ML_30_ROE_20_STUDY",
+            "MB_100_STUDY",
         "issuers":
             int(len(result)),
         "valid_complete_scores":
@@ -1095,27 +1095,15 @@ def _self_test():
         ]
     ):
         raise TurnaroundError(
-            "SELF-TEST: direção do score 50/30/20 incorreta."
+            "SELF-TEST: direção do score MB 100% incorreta."
         )
 
     # Verifica matematicamente a ponderação.
     expected_first = (
-        0.50
+        1.00
         * indexed.loc[
             "1",
             "MARGEM_BRUTA_DEPRESSED_SIGNAL",
-        ]
-        +
-        0.30
-        * indexed.loc[
-            "1",
-            "MARGEM_LIQUIDA_DEPRESSED_SIGNAL",
-        ]
-        +
-        0.20
-        * indexed.loc[
-            "1",
-            "ROE_DEPRESSED_SIGNAL",
         ]
     )
 
@@ -1129,7 +1117,7 @@ def _self_test():
         actual_first,
     ):
         raise TurnaroundError(
-            "SELF-TEST: pesos 50/30/20 incorretos."
+            "SELF-TEST: peso MB 100% incorreto."
         )
 
     production_authorized = bool(
@@ -1156,7 +1144,7 @@ def _self_test():
             == "STUDY_SCORE_AUTHORIZED"
         ).all():
             raise TurnaroundError(
-                "SELF-TEST: score 50/30/20 autorizado não foi "
+                "SELF-TEST: score MB 100% autorizado não foi "
                 "liberado corretamente."
             )
 
@@ -1251,9 +1239,9 @@ if __name__ == "__main__":
         else "RESEARCH ONLY",
     )
     print("Score do estudo:")
-    print("  MARGEM_BRUTA   = 50%")
-    print("  MARGEM_LIQUIDA = 30%")
-    print("  ROE            = 20%")
+    print("  MARGEM_BRUTA   = 100%")
+    print("  MARGEM_LIQUIDA = 0% (auditoria)")
+    print("  ROE            = 0% (auditoria)")
     print("Direção dos três fatores: LOW")
     print("Retorno futuro usado no cálculo: NÃO")
     print("Pesos otimizados por retorno futuro: NÃO")
