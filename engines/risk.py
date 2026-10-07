@@ -20,7 +20,7 @@
 # - descobrir fatores;
 # - alterar Quality Score;
 # - alterar Valuation Score;
-# - descobrir/recalcular o score fundamental 50/30/20;
+# - descobrir/recalcular o score fundamental MB 100%;
 # - utilizar retorno futuro;
 # - otimizar carteira usando retorno futuro;
 # - estimar retorno esperado.
@@ -307,7 +307,7 @@ def assert_ranking_study_model_integrity(
     """
     O Risk Engine não descobre nem recalcula fatores.
 
-    Ele pode receber o score 50/30/20 já produzido e autorizado pelo
+    Ele pode receber o score MB 100% já produzido e autorizado pelo
     Ranking Engine, desde que os metadados confirmem exatamente o modelo
     do estudo. Qualquer uso ambíguo/legado de Turnaround continua bloqueado.
     """
@@ -350,16 +350,16 @@ def assert_ranking_study_model_integrity(
         .tolist()
     )
 
-    if models != ["MB_50_ML_30_ROE_20_STUDY"]:
+    if models != ["MB_100_STUDY"]:
         raise RiskIntegrityError(
             "FAIL-SAFE: modelo de ranking não autorizado no Risk Engine. "
             f"Modelos detectados={models}"
         )
 
     expected_weights = {
-        "MARGEM_BRUTA_WEIGHT": 0.50,
-        "MARGEM_LIQUIDA_WEIGHT": 0.30,
-        "ROE_WEIGHT": 0.20,
+        "MARGEM_BRUTA_WEIGHT": 1.00,
+        "MARGEM_LIQUIDA_WEIGHT": 0.00,
+        "ROE_WEIGHT": 0.00,
     }
 
     for column, expected in expected_weights.items():
@@ -1498,14 +1498,14 @@ def _self_test():
                 True,
             ],
             "RANKING_MODEL": [
-                "MB_50_ML_30_ROE_20_STUDY",
-                "MB_50_ML_30_ROE_20_STUDY",
-                "MB_50_ML_30_ROE_20_STUDY",
-                "MB_50_ML_30_ROE_20_STUDY",
+                "MB_100_STUDY",
+                "MB_100_STUDY",
+                "MB_100_STUDY",
+                "MB_100_STUDY",
             ],
-            "MARGEM_BRUTA_WEIGHT": [0.50, 0.50, 0.50, 0.50],
-            "MARGEM_LIQUIDA_WEIGHT": [0.30, 0.30, 0.30, 0.30],
-            "ROE_WEIGHT": [0.20, 0.20, 0.20, 0.20],
+            "MARGEM_BRUTA_WEIGHT": [1.00, 1.00, 1.00, 1.00],
+            "MARGEM_LIQUIDA_WEIGHT": [0.00, 0.00, 0.00, 0.00],
+            "ROE_WEIGHT": [0.00, 0.00, 0.00, 0.00],
             "QUALITY_WEIGHT": [0.0, 0.0, 0.0, 0.0],
             "VALUATION_WEIGHT": [0.0, 0.0, 0.0, 0.0],
             "FUTURE_RETURN_USED_RANKING": [
@@ -1686,7 +1686,7 @@ if __name__ == "__main__":
     print("Concentração setorial: CONTROLÁVEL")
     print("Pesos: EQUAL WEIGHT")
     print("Retorno futuro: NÃO UTILIZADO")
-    print("Score 50/30/20 do Ranking: ACEITO E PRESERVADO")
+    print("Score MB 100% do Ranking: ACEITO E PRESERVADO")
     print("Turnaround recalculado pelo Risk: NÃO")
     print("Otimização por retorno: NÃO")
     print("Seleção final: AUDITÁVEL")
