@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import shutil
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,9 +57,11 @@ except ImportError as exc:
 CVM_DIR = DATA_DIR / "cvm"
 RAW_DIR = CVM_DIR / "raw"
 MANIFEST_DIR = CVM_DIR / "manifests"
+VINTAGE_DIR = CVM_DIR / "vintages"
 
 RAW_DIR.mkdir(parents=True, exist_ok=True)
 MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+VINTAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # =============================================================================
@@ -308,11 +311,33 @@ def _save_manifest(
         "size_bytes": path.stat().st_size,
         "sha256": _sha256(path),
         "downloaded_at_utc": _utc_now_iso(),
+        "publication_date_verified": False,
+        "publication_date_source": None,
+        "pit_eligible": False,
+        "note": (
+            "Data de download não é data de publicação. "
+            "Arquivo anual consolidado pode incluir retificações posteriores."
+        ),
     }
 
+    # Preserve todas as versões observadas, mesmo após nova atualização
+    # dos ZIPs anuais consolidados da CVM.
+    vintage_sha = manifest["sha256"]
+    vintage_path = (
+        VINTAGE_DIR / f"{dataset.lower()}_{year}_{vintage_sha}.zip"
+    )
+    if vintage_path.exists():
+        if _sha256(vintage_path) != vintage_sha:
+            raise CVMIntegrityError("FAIL-SAFE: vintage local adulterado.")
+    else:
+        shutil.copy2(path, vintage_path)
+        if _sha256(vintage_path) != vintage_sha:
+            vintage_path.unlink(missing_ok=True)
+            raise CVMIntegrityError("FAIL-SAFE: falha ao preservar vintage.")
+    manifest["immutable_vintage_file"] = str(vintage_path)
     manifest_path = (
         MANIFEST_DIR
-        / f"{dataset.lower()}_{year}_manifest.json"
+        / f"{dataset.lower()}_{year}_{vintage_sha}_manifest.json"
     )
 
     with manifest_path.open(
@@ -366,7 +391,8 @@ def download_dataset(
 
         try:
             validate_zip(destination)
-
+            # Verifica/gera manifesto e cópia imutável inclusive para cache.
+            _save_manifest(dataset, year, destination, url)
             return destination
 
         except CVMIntegrityError:
@@ -630,6 +656,13 @@ def read_csv_from_zip(
         for column in dataframe.columns
     ]
 
+    # Proveniência do ZIP de origem. NÃO atribuir publicação documental
+    # a linhas contábeis sem vínculo explícito com protocolo oficial.
+    dataframe.attrs["cvm_source_url"] = build_url(dataset, year)
+    dataframe.attrs["cvm_zip_sha256"] = _sha256(path)
+    dataframe.attrs["cvm_internal_file"] = internal_file
+    dataframe.attrs["cvm_publication_date_verified"] = False
+
     return dataframe
 
 
@@ -770,6 +803,45 @@ def local_status() -> pd.DataFrame:
             )
 
     return pd.DataFrame(rows)
+
+
+
+
+# =============================================================================
+# GATE DE PROVENIÊNCIA DOCUMENTAL — 34 ETAPAS
+# =============================================================================
+
+def require_document_publication_evidence(
+    df: pd.DataFrame,
+    *,
+    date_column: str = "DT_PUBLICACAO_CVM_VERIFICADA",
+    document_column: str = "PROTOCOLO_CVM_DOCUMENTO",
+) -> pd.DataFrame:
+    """Valida presença estrutural de evidência documental, sem inventá-la.
+
+    Esta função NÃO certifica autenticidade dos protocolos: essa verificação
+    requer integração independente com o registro de documentos CVM.
+    """
+    missing = [
+        col for col in (date_column, document_column)
+        if col not in df.columns
+    ]
+    if missing:
+        raise CVMDataError(
+            "PENDENTE — documentos CVM sem evidência de publicação "
+            f"individual verificável: {missing}. ZIP anual não basta."
+        )
+    parsed = pd.to_datetime(df[date_column], errors="coerce", utc=True)
+    ids = df[document_column].astype("string")
+    if (
+        parsed.isna().any()
+        or ids.isna().any()
+        or ids.str.strip().eq("").any()
+    ):
+        raise CVMDataError(
+            "PENDENTE — publicação/protocolo CVM ausente ou inválido."
+        )
+    return df.copy()
 
 
 # =============================================================================
