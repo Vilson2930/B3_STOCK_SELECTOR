@@ -1,265 +1,1065 @@
-"""B3 STOCK SELECTOR — Quality Engine, estudo científico de 34 etapas.
+# =============================================================================
+# B3 STOCK SELECTOR
+# Arquivo: engines/quality.py
+#
+# QUALITY ENGINE
+#
+# OBJETIVO:
+# Medir qualidade econômica/financeira das empresas que já passaram pelo
+# Investability Gate.
+#
+# IMPORTANTE:
+# - Quality NÃO é Turnaround.
+# - Este motor NÃO utiliza a descoberta de "margem baixa" como vantagem.
+# - Não utiliza retorno futuro.
+# - Não otimiza pesos olhando desempenho futuro.
+# - Produz uma camada independente que posteriormente poderá ser combinada
+#   com Valuation e/ou Turnaround.
+#
+# FILOSOFIA:
+# Empresas de qualidade apresentam, em termos gerais:
+# - rentabilidade saudável;
+# - operação lucrativa;
+# - geração de caixa;
+# - estrutura financeira sustentável;
+# - eficiência operacional.
+#
+# O motor utiliza percentis cross-sectional para reduzir dependência
+# de escalas absolutas.
+# =============================================================================
 
-Este módulo AUDITA indicadores; não inventa pesos, limiares, aprovação ou
-recomendação. Dados sem proveniência documental comprovada ficam PENDENTES.
-Os critérios definitivos dependem da matriz auditada das 34 etapas.
-"""
 from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
 
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+
 try:
-    from config import OUTPUT_DIR, QUALITY_ENGINE
-    from data.pit import PITContext
+    from config import (
+        OUTPUT_DIR,
+        QUALITY_ENGINE,
+    )
+
 except ImportError as exc:
-    raise RuntimeError('FAIL-SAFE: dependências do Quality Engine indisponíveis') from exc
+    raise RuntimeError(
+        "FAIL-SAFE: não foi possível importar config.py."
+    ) from exc
 
-QUALITY_DIR = Path(OUTPUT_DIR) / 'quality'
-QUALITY_DIR.mkdir(parents=True, exist_ok=True)
 
-# Catálogo de indicadores históricos: não constitui fórmula de ranking.
-QUALITY_FACTORS = {
-    'ROA': 'HIGH', 'GIRO_ATIVO': 'HIGH', 'FCO_ATIVO': 'HIGH',
-    'FCO_RECEITA': 'HIGH', 'DIVIDA_BRUTA_ATIVO': 'LOW',
-    'DIVIDA_LIQUIDA_ATIVO': 'LOW', 'CAPITAL_GIRO_ATIVO': 'HIGH',
-}
-QUALITY_FLAGS = (
-    'LUCRO_POSITIVO', 'EBIT_POSITIVO', 'FCO_POSITIVO',
-    'CAPITAL_GIRO_POSITIVO', 'PL_POSITIVO',
+try:
+    from data.pit import PITContext
+
+except ImportError as exc:
+    raise RuntimeError(
+        "FAIL-SAFE: não foi possível importar PITContext."
+    ) from exc
+
+
+# =============================================================================
+# DIRETÓRIO
+# =============================================================================
+
+QUALITY_DIR = (
+    OUTPUT_DIR
+    / "quality"
 )
-# Não há pesos de fatores aprovados no estudo.
-FACTOR_WEIGHT = None
-FLAG_WEIGHT = None
 
+QUALITY_DIR.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+
+# =============================================================================
+# EXCEÇÕES
+# =============================================================================
 
 class QualityError(RuntimeError):
-    pass
+    """Erro geral do Quality Engine."""
 
 
 class QualityIntegrityError(QualityError):
-    pass
+    """Erro estrutural."""
 
+
+# =============================================================================
+# FATORES
+#
+# Estes fatores representam qualidade tradicional.
+#
+# HIGH:
+#     maior valor econômico tende a representar maior qualidade.
+#
+# LOW:
+#     menor valor tende a representar melhor estrutura financeira.
+#
+# ATENÇÃO:
+# Estes fatores NÃO representam a camada Turnaround.
+# =============================================================================
+
+QUALITY_FACTORS = {
+
+    "ROA": "HIGH",
+
+    "GIRO_ATIVO": "HIGH",
+
+    "FCO_ATIVO": "HIGH",
+
+    "FCO_RECEITA": "HIGH",
+
+    "DIVIDA_BRUTA_ATIVO": "LOW",
+
+    "DIVIDA_LIQUIDA_ATIVO": "LOW",
+
+    "CAPITAL_GIRO_ATIVO": "HIGH",
+}
+
+
+# =============================================================================
+# FLAGS DE QUALIDADE
+# =============================================================================
+
+QUALITY_FLAGS = (
+    "LUCRO_POSITIVO",
+    "EBIT_POSITIVO",
+    "FCO_POSITIVO",
+    "CAPITAL_GIRO_POSITIVO",
+    "PL_POSITIVO",
+)
+
+
+# =============================================================================
+# PESOS
+#
+# Não são pesos "otimizados" em retorno futuro.
+#
+# Mantemos inicialmente pesos iguais para evitar introduzir uma falsa
+# precisão antes de validação científica específica.
+# =============================================================================
+
+FACTOR_WEIGHT = None  # Não validado nas 34 etapas
+FLAG_WEIGHT = None    # Não validado nas 34 etapas
+
+
+# =============================================================================
+# UTILIDADES
+# =============================================================================
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
-def _require_dataframe(df: pd.DataFrame, name: str) -> None:
-    if not isinstance(df, pd.DataFrame):
-        raise QualityIntegrityError(f'{name} não é DataFrame')
+def _require_dataframe(
+    df: pd.DataFrame,
+    name: str,
+) -> None:
+
+    if not isinstance(
+        df,
+        pd.DataFrame,
+    ):
+
+        raise QualityIntegrityError(
+            f"{name} não é DataFrame."
+        )
+
+    if df.empty:
+
+        raise QualityIntegrityError(
+            f"FAIL-SAFE: {name} está vazio."
+        )
 
 
-def _require_columns(df: pd.DataFrame, columns: Iterable[str], name: str) -> None:
-    _require_dataframe(df, name)
-    missing = sorted(set(columns) - set(df.columns))
+def _require_columns(
+    df: pd.DataFrame,
+    columns: Iterable[str],
+    name: str,
+) -> None:
+
+    _require_dataframe(
+        df,
+        name,
+    )
+
+    missing = (
+        set(columns)
+        - set(df.columns)
+    )
+
     if missing:
-        raise QualityIntegrityError(f'{name} sem colunas: {missing}')
+
+        raise QualityIntegrityError(
+            f"FAIL-SAFE: {name} sem colunas: "
+            f"{sorted(missing)}"
+        )
 
 
-def assert_no_future_return(df: pd.DataFrame) -> None:
-    _require_dataframe(df, 'quality_data')
-    forbidden = ('FUTURE_RETURN', 'RETORNO_FUTURO', 'RETURN_FUTURE',
-                 'FUTURE_WINNER', 'WINNER_LABEL')
-    allowed = {'FUTURE_RETURN_USED', 'FUTURE_RETURN_USED_QUALITY'}
-    for col in df.columns:
-        key = str(col).upper()
-        if key in allowed:
-            vals = df[col].dropna().astype(str).str.strip().str.lower()
-            if not vals.isin(('false', '0')).all():
-                raise QualityIntegrityError(f'Indicador de retorno futuro: {col}')
-        elif any(term in key for term in forbidden):
-            raise QualityIntegrityError(f'Coluna de retorno futuro proibida: {col}')
+# =============================================================================
+# PROTEÇÃO CONTRA RETORNO FUTURO
+# =============================================================================
 
+def assert_no_future_return(
+    df: pd.DataFrame,
+) -> None:
 
-def _explicit_bool(value):
-    if isinstance(value, (bool, np.bool_)):
-        return bool(value)
-    if isinstance(value, str):
-        key = value.strip().lower()
-        if key in ('true', 'sim', '1'):
-            return True
-        if key in ('false', 'não', 'nao', '0'):
-            return False
-    return pd.NA
-
-
-def prepare_quality_base(fundamentals: pd.DataFrame) -> pd.DataFrame:
-    _require_columns(fundamentals, ('ISSUER_ID',), 'fundamentals')
-    assert_no_future_return(fundamentals)
-    result = fundamentals.copy()
-    if result['ISSUER_ID'].isna().any() or result['ISSUER_ID'].astype(str).str.strip().eq('').any():
-        raise QualityIntegrityError('Identidade de emissor ausente')
-    if result['ISSUER_ID'].duplicated().any():
-        raise QualityIntegrityError('ISSUER_ID duplicado')
-    # Não eliminar empresas pendentes: preservar universo e motivos para auditoria.
-    return result
-
-
-def percentile_score(series: pd.Series, direction: str = 'HIGH') -> pd.Series:
-    """Utilitário exploratório, NÃO utilizado para aprovar ou classificar ações."""
-    if direction not in ('HIGH', 'LOW'):
-        raise QualityIntegrityError('Direção inválida')
-    values = pd.to_numeric(series, errors='coerce').replace([np.inf, -np.inf], np.nan)
-    score = values.rank(pct=True, method='average')
-    return score if direction == 'HIGH' else 1 - score
-
-
-def _evidence_status(df: pd.DataFrame, context: PITContext) -> pd.Series:
-    date_col = next((x for x in ('DT_PUBLICACAO_CVM_VERIFICADA',
-                                 'PUBLICATION_DATE_VERIFIED') if x in df), None)
-    doc_col = next((x for x in ('PROTOCOLO_CVM_DOCUMENTO',
-                                'CVM_DOCUMENT_ID') if x in df), None)
-    if date_col is None or doc_col is None:
-        return pd.Series(False, index=df.index, dtype=bool)
-    publication = pd.to_datetime(df[date_col], errors='coerce', utc=True)
-    cutoff = pd.Timestamp(context.accounting_cutoff)
-    formation = pd.Timestamp(context.formation_date)
-    cutoff = cutoff.tz_localize('UTC') if cutoff.tzinfo is None else cutoff.tz_convert('UTC')
-    formation = formation.tz_localize('UTC') if formation.tzinfo is None else formation.tz_convert('UTC')
-    docs = df[doc_col].astype('string')
-    return (publication.notna() & publication.le(cutoff) &
-            publication.le(formation) & docs.notna() &
-            docs.str.strip().ne('').fillna(False)).fillna(False).astype(bool)
-
-
-def calculate_factor_scores(df: pd.DataFrame) -> pd.DataFrame:
-    """Preserva valores brutos; percentis antigos não são seleção validada."""
-    result = df.copy()
-    present = [name for name in QUALITY_FACTORS if name in result]
-    for name in present:
-        values = pd.to_numeric(result[name], errors='coerce')
-        result[f'QUALITY_OBS_{name}'] = values.replace([np.inf, -np.inf], np.nan)
-    result['QUALITY_FACTOR_COVERAGE'] = (
-        result[[f'QUALITY_OBS_{name}' for name in present]].notna().sum(axis=1)
-        / len(QUALITY_FACTORS)
-        if present else pd.Series(0.0, index=result.index)
+    forbidden_terms = (
+        "FUTURE_RETURN",
+        "RETORNO_FUTURO",
+        "RETURN_FUTURE",
+        "FUTURE_WINNER",
+        "WINNER_LABEL",
     )
-    result['QUALITY_CONTINUOUS_SCORE'] = np.nan
-    return result
+
+    # -------------------------------------------------------------------------
+    # COLUNAS DE AUDITORIA PERMITIDAS
+    #
+    # Elas NÃO contêm retorno futuro.
+    # Apenas registram explicitamente que retorno futuro NÃO foi utilizado.
+    # -------------------------------------------------------------------------
+
+    allowed_audit_columns = {
+        "FUTURE_RETURN_USED",
+        "FUTURE_RETURN_USED_QUALITY",
+    }
+
+    forbidden = []
+
+    for column in df.columns:
+
+        normalized = (
+            str(column)
+            .upper()
+        )
+
+        if normalized in allowed_audit_columns:
+
+            values = (
+                df[column]
+                .dropna()
+            )
+
+            if not values.empty:
+
+                normalized_values = (
+                    values
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                )
+
+                invalid_values = (
+                    ~normalized_values.isin(
+                        {
+                            "FALSE",
+                            "0",
+                        }
+                    )
+                )
+
+                if invalid_values.any():
+
+                    raise QualityIntegrityError(
+                        "FAIL-SAFE: coluna de auditoria "
+                        f"{column} indica possível uso de retorno futuro."
+                    )
+
+            continue
+
+        if any(
+            term in normalized
+            for term in forbidden_terms
+        ):
+
+            forbidden.append(
+                column
+            )
+
+    if forbidden:
+
+        raise QualityIntegrityError(
+            "FAIL-SAFE: variável relacionada a "
+            "retorno futuro detectada no Quality Engine: "
+            f"{forbidden}"
+        )
 
 
-def calculate_flag_score(df: pd.DataFrame) -> pd.DataFrame:
-    result = df.copy()
-    present = [name for name in QUALITY_FLAGS if name in result]
-    for name in present:
-        result[f'QUALITY_OBS_{name}'] = result[name].map(_explicit_bool).astype('boolean')
-    result['QUALITY_FLAG_COVERAGE'] = (
-        result[[f'QUALITY_OBS_{name}' for name in present]].notna().sum(axis=1)
-        / len(QUALITY_FLAGS)
-        if present else pd.Series(0.0, index=result.index)
+# =============================================================================
+# PREPARAÇÃO
+# =============================================================================
+
+def prepare_quality_base(
+    fundamentals: pd.DataFrame,
+) -> pd.DataFrame:
+
+    required = {
+        "ISSUER_ID",
+        "FUNDAMENTAL_ENGINE_OK",
+    }
+
+    _require_columns(
+        fundamentals,
+        required,
+        "fundamentals",
     )
-    result['QUALITY_FLAG_SCORE'] = np.nan
+
+    assert_no_future_return(
+        fundamentals
+    )
+
+    result = (
+        fundamentals
+        .copy()
+    )
+
+    # -------------------------------------------------------------------------
+    # SE INVESTABILITY ESTIVER PRESENTE, SOMENTE PASSADOS AVANÇAM
+    # -------------------------------------------------------------------------
+
+    if "INVESTABLE" in result.columns:
+
+        result = result.loc[
+            result[
+                "INVESTABLE"
+            ]
+            .pipe(_boolean_to_float)
+            .eq(1.0)
+        ].copy()
+
+    # -------------------------------------------------------------------------
+    # FUNDAMENTAL ENGINE
+    # -------------------------------------------------------------------------
+
+    result = result.loc[
+        result[
+            "FUNDAMENTAL_ENGINE_OK"
+        ]
+        .fillna(False)
+        .astype(bool)
+    ].copy()
+
+    if result.empty:
+
+        raise QualityIntegrityError(
+            "FAIL-SAFE: nenhuma empresa elegível "
+            "para o Quality Engine."
+        )
+
+    if (
+        result[
+            "ISSUER_ID"
+        ]
+        .duplicated()
+        .any()
+    ):
+
+        raise QualityIntegrityError(
+            "FAIL-SAFE: ISSUER_ID duplicado."
+        )
+
     return result
 
+
+# =============================================================================
+# PERCENTIL
+# =============================================================================
+
+def percentile_score(
+    series: pd.Series,
+    direction: str,
+) -> pd.Series:
+    """
+    Converte fator em percentil [0,1].
+
+    HIGH:
+        maior valor = maior score.
+
+    LOW:
+        menor valor = maior score.
+
+    Missing:
+        permanece NaN.
+
+    Nenhuma imputação é realizada neste estágio.
+    """
+
+    numeric = pd.to_numeric(
+        series,
+        errors="coerce",
+    )
+
+    score = pd.Series(
+        np.nan,
+        index=series.index,
+        dtype=float,
+    )
+
+    valid = numeric.notna()
+
+    if valid.sum() == 0:
+        return score
+
+    ranked = (
+        numeric.loc[
+            valid
+        ]
+        .rank(
+            pct=True,
+            method="average",
+        )
+    )
+
+    if direction == "HIGH":
+
+        score.loc[
+            valid
+        ] = ranked
+
+    elif direction == "LOW":
+
+        score.loc[
+            valid
+        ] = (
+            1.0
+            -
+            ranked
+            +
+            (
+                1.0
+                /
+                valid.sum()
+            )
+        )
+
+    else:
+
+        raise QualityIntegrityError(
+            f"Direção inválida: {direction}"
+        )
+
+    return score.clip(
+        lower=0.0,
+        upper=1.0,
+    )
+
+
+# =============================================================================
+# SCORE DOS FATORES
+# =============================================================================
+
+def calculate_factor_scores(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    result = (
+        df
+        .copy()
+    )
+
+    score_columns = []
+
+    for (
+        factor,
+        direction,
+    ) in QUALITY_FACTORS.items():
+
+        score_column = (
+            f"QUALITY_FACTOR_{factor}"
+        )
+
+        if factor not in result.columns:
+
+            result[
+                score_column
+            ] = np.nan
+
+        else:
+
+            result[
+                score_column
+            ] = percentile_score(
+                result[
+                    factor
+                ],
+                direction,
+            )
+
+        score_columns.append(
+            score_column
+        )
+
+    result[
+        "QUALITY_FACTOR_AVAILABLE"
+    ] = (
+        result[
+            score_columns
+        ]
+        .notna()
+        .sum(
+            axis=1
+        )
+    )
+
+    result[
+        "QUALITY_FACTOR_REQUIRED"
+    ] = len(
+        score_columns
+    )
+
+    result[
+        "QUALITY_FACTOR_COVERAGE"
+    ] = (
+        result[
+            "QUALITY_FACTOR_AVAILABLE"
+        ]
+        /
+        result[
+            "QUALITY_FACTOR_REQUIRED"
+        ]
+    )
+
+    result[
+        "QUALITY_CONTINUOUS_SCORE"
+    ] = (
+        result[
+            score_columns
+        ]
+        .mean(
+            axis=1,
+            skipna=True,
+        )
+    )
+
+    return result
+
+
+# =============================================================================
+# SCORE DOS FLAGS
+# =============================================================================
+
+def _boolean_to_float(
+    series: pd.Series,
+) -> pd.Series:
+
+    output = pd.Series(
+        np.nan,
+        index=series.index,
+        dtype=float,
+    )
+
+    if pd.api.types.is_bool_dtype(
+        series
+    ):
+
+        valid = series.notna()
+
+        output.loc[
+            valid
+        ] = (
+            series.loc[
+                valid
+            ]
+            .astype(float)
+        )
+
+        return output
+
+    normalized = (
+        series
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
+
+    true_values = {
+        "TRUE",
+        "1",
+        "YES",
+        "SIM",
+    }
+
+    false_values = {
+        "FALSE",
+        "0",
+        "NO",
+        "NAO",
+        "NÃO",
+    }
+
+    true_mask = (
+        normalized.isin(
+            true_values
+        )
+    )
+
+    false_mask = (
+        normalized.isin(
+            false_values
+        )
+    )
+
+    output.loc[
+        true_mask
+    ] = 1.0
+
+    output.loc[
+        false_mask
+    ] = 0.0
+
+    return output
+
+
+def calculate_flag_score(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    result = (
+        df
+        .copy()
+    )
+
+    flag_columns = []
+
+    for flag in QUALITY_FLAGS:
+
+        score_column = (
+            f"QUALITY_FLAG_{flag}"
+        )
+
+        if flag not in result.columns:
+
+            result[
+                score_column
+            ] = np.nan
+
+        else:
+
+            result[
+                score_column
+            ] = _boolean_to_float(
+                result[
+                    flag
+                ]
+            )
+
+        flag_columns.append(
+            score_column
+        )
+
+    result[
+        "QUALITY_FLAGS_AVAILABLE"
+    ] = (
+        result[
+            flag_columns
+        ]
+        .notna()
+        .sum(
+            axis=1
+        )
+    )
+
+    result[
+        "QUALITY_FLAGS_REQUIRED"
+    ] = len(
+        flag_columns
+    )
+
+    result[
+        "QUALITY_FLAG_COVERAGE"
+    ] = (
+        result[
+            "QUALITY_FLAGS_AVAILABLE"
+        ]
+        /
+        result[
+            "QUALITY_FLAGS_REQUIRED"
+        ]
+    )
+
+    result[
+        "QUALITY_FLAG_SCORE"
+    ] = (
+        result[
+            flag_columns
+        ]
+        .mean(
+            axis=1,
+            skipna=True,
+        )
+    )
+
+    return result
+
+
+# =============================================================================
+# SCORE FINAL QUALITY
+# =============================================================================
 
 def calculate_quality_score(df: pd.DataFrame) -> pd.DataFrame:
-    """Nunca transforma indicadores exploratórios em ranking de investimento."""
+    """Contrato de saída preservado, pontuação não validada desabilitada."""
     result = df.copy()
-    for field in ('QUALITY_FACTOR_COVERAGE', 'QUALITY_FLAG_COVERAGE'):
-        if field not in result:
-            result[field] = 0.0
-    result['QUALITY_DATA_COVERAGE'] = (
-        pd.to_numeric(result['QUALITY_FACTOR_COVERAGE'], errors='coerce').fillna(0)
-        + pd.to_numeric(result['QUALITY_FLAG_COVERAGE'], errors='coerce').fillna(0)
-    ) / 2
-    result['QUALITY_SCORE'] = np.nan
-    result['QUALITY_SCORE_VALID'] = False
-    result['QUALITY_RANK'] = np.nan
-    result['QUALITY_STATUS'] = 'PENDENTE'
-    result['QUALITY_REASON'] = (
-        'Critérios, pesos e evidências das 34 etapas ainda não homologados.'
+    result["QUALITY_SCORE"] = np.nan
+    result["QUALITY_DATA_COVERAGE"] = (
+        result["QUALITY_FACTOR_COVERAGE"].fillna(0)
+        + result["QUALITY_FLAG_COVERAGE"].fillna(0)
+    ) / 2.0
+    result["QUALITY_SCORE_VALID"] = False
+    result["QUALITY_STUDY_STATUS"] = "PENDENTE"
+    result["QUALITY_STUDY_REASON"] = (
+        "Pesos, cobertura mínima e regras de aprovação dependem "
+        "da matriz validada das 34 etapas."
     )
     return result
 
 
-def run_quality_engine(fundamentals: pd.DataFrame, context: PITContext) -> pd.DataFrame:
-    if not isinstance(QUALITY_ENGINE, dict):
-        raise QualityIntegrityError('QUALITY_ENGINE inválido em config.py')
-    if not QUALITY_ENGINE.get('enabled', True):
-        raise QualityError('Quality Engine desativado')
-    result = calculate_quality_score(calculate_flag_score(
-        calculate_factor_scores(prepare_quality_base(fundamentals))
-    ))
-    result['QUALITY_PUBLICATION_EVIDENCE_PRESENT'] = _evidence_status(result, context)
-    result.loc[~result['QUALITY_PUBLICATION_EVIDENCE_PRESENT'], 'QUALITY_REASON'] = (
-        'Publicação/protocolo CVM sem comprovação PIT; demais critérios pendentes.'
+# =============================================================================
+# MOTOR PRINCIPAL
+# =============================================================================
+
+def run_quality_engine(
+    fundamentals: pd.DataFrame,
+    context: PITContext,
+) -> pd.DataFrame:
+
+    if not QUALITY_ENGINE.get(
+        "enabled",
+        True,
+    ):
+
+        raise QualityError(
+            "Quality Engine está desativado."
+        )
+
+    # Publicação efetiva da CVM, e não DT_REFER, determina disponibilidade.
+    # Não transformar uma data autodeclarada em prova de autenticidade:
+    # o coletor CVM deve comprovar o vínculo documento/protocolo/versão.
+    evidence_cols = (
+        "DT_PUBLICACAO_CVM_VERIFICADA",
+        "PROTOCOLO_CVM_DOCUMENTO",
     )
-    result['QUALITY_ENGINE_VERSION'] = 'study34-evidence-only-1.0'
-    result['QUALITY_ENGINE_STATUS'] = 'RESEARCH_ONLY_NOT_APPROVED'
-    result['FORMATION_DATE_QUALITY'] = context.formation_date
-    result['ACCOUNTING_CUTOFF_QUALITY'] = context.accounting_cutoff
-    result['FUTURE_RETURN_USED_QUALITY'] = False
-    assert_no_future_return(result)
-    return result.sort_values('ISSUER_ID', kind='mergesort').reset_index(drop=True)
+    missing = [c for c in evidence_cols if c not in fundamentals.columns]
+    if missing:
+        raise QualityIntegrityError(
+            "PENDENTE: publicação documental CVM não comprovada: "
+            f"{missing}"
+        )
+    published = pd.to_datetime(
+        fundamentals[evidence_cols[0]], errors="coerce", utc=True
+    )
+    cutoff = pd.Timestamp(context.accounting_cutoff)
+    cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+    formation = pd.Timestamp(context.formation_date)
+    formation = formation.tz_localize("UTC") if formation.tzinfo is None else formation.tz_convert("UTC")
+    ids = fundamentals[evidence_cols[1]].astype("string")
+    allowed = (
+        published.notna()
+        & published.le(cutoff)
+        & published.le(formation)
+        & ids.notna()
+        & ids.str.strip().ne("").fillna(False)
+    )
+    if not allowed.all():
+        raise QualityIntegrityError(
+            "PENDENTE: demonstrações sem protocolo/publicação elegível; "
+            "verificar na fonte oficial antes de executar."
+        )
+    base = prepare_quality_base(fundamentals)
+
+    result = calculate_factor_scores(
+        base
+    )
+
+    result = calculate_flag_score(
+        result
+    )
+
+    result = calculate_quality_score(
+        result
+    )
+
+    result[
+        "QUALITY_ENGINE_VERSION"
+    ] = "0.2.0-AUDIT-ONLY"
+
+    result[
+        "QUALITY_ENGINE_STATUS"
+    ] = QUALITY_ENGINE.get(
+        "status",
+        "REFERENCE_ENGINE",
+    )
+
+    result[
+        "FORMATION_DATE_QUALITY"
+    ] = context.formation_date
+
+    result[
+        "ACCOUNTING_CUTOFF_QUALITY"
+    ] = context.accounting_cutoff
+
+    result[
+        "FUTURE_RETURN_USED_QUALITY"
+    ] = False
+
+    result["QUALITY_RANK"] = np.nan
+    result = result.sort_values("ISSUER_ID", kind="mergesort").reset_index(drop=True)
+
+    assert_no_future_return(
+        result
+    )
+
+    return result
 
 
-def audit_quality(result: pd.DataFrame) -> dict:
-    _require_columns(result, ('ISSUER_ID', 'QUALITY_SCORE', 'QUALITY_STATUS',
-                              'QUALITY_DATA_COVERAGE'), 'quality_result')
+# =============================================================================
+# AUDITORIA
+# =============================================================================
+
+def audit_quality(
+    result: pd.DataFrame,
+) -> dict:
+
+    _require_dataframe(
+        result,
+        "quality_result",
+    )
+
+    valid_scores = (
+        result[
+            "QUALITY_SCORE"
+        ]
+        .notna()
+    )
+
     return {
-        'status': 'PENDENTE', 'issuers': len(result),
-        'approved_issuers': 0, 'valid_scores': int(result['QUALITY_SCORE'].notna().sum()),
-        'mean_score': None, 'median_score': None,
-        'mean_data_coverage': float(result['QUALITY_DATA_COVERAGE'].mean()) if len(result) else None,
-        'factor_weight': None, 'flag_weight': None,
-        'future_return_used': False, 'turnaround_signal_used': False,
-        'reason': 'Matriz das 34 etapas e evidência documental incompletas',
+        "status":
+            "OK",
+
+        "issuers":
+            int(
+                len(
+                    result
+                )
+            ),
+
+        "valid_scores":
+            int(
+                valid_scores.sum()
+            ),
+
+        "mean_score":
+            (
+                float(
+                    result.loc[
+                        valid_scores,
+                        "QUALITY_SCORE",
+                    ]
+                    .mean()
+                )
+                if valid_scores.any()
+                else None
+            ),
+
+        "median_score":
+            (
+                float(
+                    result.loc[
+                        valid_scores,
+                        "QUALITY_SCORE",
+                    ]
+                    .median()
+                )
+                if valid_scores.any()
+                else None
+            ),
+
+        "mean_data_coverage":
+            float(
+                result[
+                    "QUALITY_DATA_COVERAGE"
+                ]
+                .mean()
+            ),
+
+        "factor_weight":
+            FACTOR_WEIGHT,
+
+        "flag_weight":
+            FLAG_WEIGHT,
+
+        "future_return_used":
+            False,
+
+        "turnaround_signal_used":
+            False,
     }
 
 
-def save_quality(result: pd.DataFrame, context: PITContext, *, prefix: str = 'quality') -> dict:
-    """Salva resultados de auditoria, jamais carteira aprovada."""
-    audit = audit_quality(result)
-    tag = pd.Timestamp(context.formation_date).strftime('%Y%m%d')
-    QUALITY_DIR.mkdir(parents=True, exist_ok=True)
-    result_path = QUALITY_DIR / f'{prefix}_{tag}.csv'
-    manifest_path = QUALITY_DIR / f'{prefix}_manifest_{tag}.json'
-    result.to_csv(result_path, index=False, encoding='utf-8-sig')
+# =============================================================================
+# SALVAR
+# =============================================================================
+
+def save_quality(
+    result: pd.DataFrame,
+    context: PITContext,
+) -> dict:
+
+    audit = audit_quality(
+        result
+    )
+
+    date_tag = (
+        context
+        .formation_date
+        .strftime(
+            "%Y%m%d"
+        )
+    )
+
+    result_path = (
+        QUALITY_DIR
+        / f"quality_{date_tag}.csv"
+    )
+
+    manifest_path = (
+        QUALITY_DIR
+        / f"quality_manifest_{date_tag}.json"
+    )
+
+    result.to_csv(
+        result_path,
+        index=False,
+        encoding="utf-8-sig",
+    )
+
     manifest = {
-        'engine': 'QUALITY_ENGINE', 'created_at_utc': _utc_now_iso(),
-        'formation_date': str(pd.Timestamp(context.formation_date).date()),
-        'accounting_cutoff': str(pd.Timestamp(context.accounting_cutoff).date()),
-        'factors_observed_not_weighted': QUALITY_FACTORS,
-        'flags_observed_not_weighted': list(QUALITY_FLAGS),
-        **audit, 'files': {'quality': str(result_path)},
-    }
-    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
-    return {'quality': result_path, 'manifest': manifest_path}
+        "engine":
+            "QUALITY_ENGINE",
 
+        "created_at_utc":
+            _utc_now_iso(),
+
+        "formation_date":
+            str(
+                context
+                .formation_date
+                .date()
+            ),
+
+        "accounting_cutoff":
+            str(
+                context
+                .accounting_cutoff
+                .date()
+            ),
+
+        "factors":
+            QUALITY_FACTORS,
+
+        "flags":
+            list(
+                QUALITY_FLAGS
+            ),
+
+        **audit,
+
+        "files": {
+            "quality":
+                str(
+                    result_path
+                ),
+        },
+    }
+
+    with manifest_path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        json.dump(
+            manifest,
+            file,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    return {
+        "quality":
+            result_path,
+
+        "manifest":
+            manifest_path,
+    }
+
+
+# =============================================================================
+# SELF-TEST
+# =============================================================================
 
 def _self_test() -> bool:
-    class Context:
-        formation_date = pd.Timestamp('2025-12-31')
-        accounting_cutoff = pd.Timestamp('2025-09-30')
+    from types import SimpleNamespace
+    context = SimpleNamespace(
+        formation_date=pd.Timestamp("2026-10-05"),
+        accounting_cutoff=pd.Timestamp("2026-09-30"),
+    )
     sample = pd.DataFrame({
-        'ISSUER_ID': ['1', '2'], 'INVESTABLE': [False, 'False'],
-        'ROA': [0.2, 0.1], 'FCO_POSITIVO': [True, 'False'],
-        'DT_PUBLICACAO_CVM_VERIFICADA': ['2025-08-01', '2025-10-01'],
-        'PROTOCOLO_CVM_DOCUMENTO': ['doc1', 'doc2'],
+        "ISSUER_ID": ["1", "2"],
+        "INVESTABLE": [True, "False"],
+        "FUNDAMENTAL_ENGINE_OK": [True, True],
+        "ROA": [0.1, 0.2],
+        "LUCRO_POSITIVO": [True, "False"],
+        "DT_PUBLICACAO_CVM_VERIFICADA": ["2026-08-01", "2026-08-01"],
+        "PROTOCOLO_CVM_DOCUMENTO": ["TEST-1", "TEST-2"],
     })
-    result = run_quality_engine(sample, Context())
-    assert len(result) == 2
-    assert result['QUALITY_SCORE'].isna().all()
-    assert result['QUALITY_STATUS'].eq('PENDENTE').all()
-    assert result['QUALITY_PUBLICATION_EVIDENCE_PRESENT'].tolist() == [True, False]
-    assert result.loc[1, 'QUALITY_OBS_FCO_POSITIVO'] == False
-    assert audit_quality(result)['approved_issuers'] == 0
-    try:
-        run_quality_engine(sample.assign(FUTURE_RETURN=[0.1, 0.2]), Context())
-    except QualityIntegrityError:
-        pass
-    else:
-        raise AssertionError('Look-ahead contaminado não foi bloqueado')
+    result = run_quality_engine(sample, context)
+    assert len(result) == 1
+    assert result["ISSUER_ID"].iloc[0] == "1"
+    assert result["QUALITY_SCORE"].isna().all()
+    assert (~result["QUALITY_SCORE_VALID"]).all()
+    assert result["QUALITY_STUDY_STATUS"].eq("PENDENTE").all()
+    for bad in (
+        sample.drop(columns=["PROTOCOLO_CVM_DOCUMENTO"]),
+        sample.assign(DT_PUBLICACAO_CVM_VERIFICADA="2026-10-06"),
+        sample.assign(FUTURE_RETURN=1.0),
+    ):
+        try:
+            run_quality_engine(bad, context)
+        except QualityIntegrityError:
+            pass
+        else:
+            raise QualityError("SELF-TEST: dado não elegível foi aceito.")
     return True
 
 
-if __name__ == '__main__':
-    print('B3 STOCK SELECTOR — QUALITY ENGINE — 34 ETAPAS')
-    print('Autoteste:', 'OK' if _self_test() else 'FALHOU')
-    print('Status: PENDENTE; nenhum ranking ou aprovação autorizado')
+# =============================================================================
+# EXECUÇÃO DIRETA
+# =============================================================================
+
+if __name__ == "__main__":
+
+    print("=" * 72)
+    print("B3 STOCK SELECTOR — QUALITY ENGINE")
+    print("=" * 72)
+
+    _self_test()
+
+    print("Self-test: OK")
+    print("Quality e Turnaround: SEPARADOS")
+    print("Pesos ajustados por retorno futuro: NÃO")
+    print("Retorno futuro: NÃO UTILIZADO")
+    print("Fail-safe de retorno futuro: OK")
+    print("Margem bruta baixa como vantagem: NÃO")
+    print("Score final de compra: NÃO")
+    print("Quality Score: BLOQUEADO até validação das 34 etapas")
+    print("Ranking interno: DESATIVADO")
+
+    print("=" * 72)
