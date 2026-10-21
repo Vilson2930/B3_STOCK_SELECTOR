@@ -338,6 +338,28 @@ def prepare_identity_map(
             f"emissores. Exemplos={examples}"
         )
 
+    # Identidade jurídica: um mesmo ticker não pode apresentar CNPJs
+    # contraditórios no mesmo mapa de referência. CNPJ vazio não prova vínculo.
+    if "CNPJ" in result.columns:
+        cleaned = (
+            result["CNPJ"].astype("string")
+            .str.replace(r"\D", "", regex=True)
+        )
+        malformed = cleaned.notna() & cleaned.ne("") & cleaned.str.len().ne(14)
+        if malformed.any():
+            raise UniverseIdentityError(
+                "FAIL-SAFE: CNPJ inválido no mapa de identidade."
+            )
+        result["CNPJ"] = cleaned.mask(cleaned.eq(""), pd.NA)
+        conflicts_cnpj = (
+            result.dropna(subset=["CNPJ"])
+            .groupby("ISSUER_ID")["CNPJ"].nunique()
+        )
+        if (conflicts_cnpj > 1).any():
+            raise UniverseIdentityError(
+                "FAIL-SAFE: emissor associado a CNPJs divergentes."
+            )
+
     # -------------------------------------------------------------------------
     # REMOVE DUPLICATAS EXATAS
     # -------------------------------------------------------------------------
@@ -734,6 +756,17 @@ def build_security_universe(
                 "IS_FINANCIAL"
             ]
         )
+
+    # Elegibilidade acima é exclusivamente técnica e herdada do módulo.
+    # A metodologia científica das 34 etapas NÃO está aprovada por esse flag.
+    # Sem documentação de continuidade jurídica, datas de vínculo e
+    # requisitos do estudo, nenhuma recomendação pode ser autorizada.
+    result["STUDY_34_STATUS"] = "PENDENTE"
+    result["STUDY_34_APPROVED"] = False
+    result["STUDY_34_REASON"] = (
+        "Pendente: identidade histórica, continuidade jurídica, "
+        "evidências PIT e critérios das 34 etapas não certificados."
+    )
 
     # -------------------------------------------------------------------------
     # MOTIVO DE EXCLUSÃO
@@ -1284,6 +1317,58 @@ def save_universe(
 
 
 # =============================================================================
+# =============================================================================
+# AUDITORIA DE IDENTIDADE HISTÓRICA — SEM APROVAÇÃO AUTOMÁTICA
+# =============================================================================
+
+def audit_historical_identity_evidence(
+    identity_history: pd.DataFrame,
+    *,
+    formation_date,
+) -> pd.DataFrame:
+    """Audita evidência fornecida, sem presumir continuidade por ticker.
+
+    A função não consulta a CVM/B3: a origem e autenticidade das datas
+    precisam ser verificadas no coletor correspondente. Resultados sempre
+    ficam PENDENTES até validação independente das 34 etapas.
+    """
+    required = {
+        "TICKER", "ISSUER_ID", "CNPJ", "VALID_FROM", "VALID_TO",
+        "SOURCE_DOCUMENT", "SOURCE_PUBLICATION_DATE",
+    }
+    _require_columns(identity_history, required, "identity_history")
+    result = identity_history.copy()
+    result["TICKER"] = result["TICKER"].map(normalize_ticker)
+    result["ISSUER_ID"] = result["ISSUER_ID"].map(normalize_issuer_id)
+    for column in ("VALID_FROM", "VALID_TO", "SOURCE_PUBLICATION_DATE"):
+        result[column] = pd.to_datetime(result[column], errors="coerce", utc=True)
+        result[column] = result[column].dt.tz_convert(None).dt.normalize()
+    cutoff = pd.Timestamp(formation_date)
+    if pd.isna(cutoff) or cutoff.tzinfo is not None:
+        raise UniverseIntegrityError("Data de formação inválida ou com fuso.")
+    cutoff = cutoff.normalize()
+    missing_evidence = (
+        result["ISSUER_ID"].isna()
+        | result["TICKER"].isna()
+        | result["CNPJ"].isna()
+        | result["VALID_FROM"].isna()
+        | result["SOURCE_PUBLICATION_DATE"].isna()
+        | result["SOURCE_DOCUMENT"].astype("string").str.strip().fillna("").eq("")
+    )
+    future = result["SOURCE_PUBLICATION_DATE"].gt(cutoff).fillna(False)
+    invalid_interval = (
+        result["VALID_TO"].notna()
+        & result["VALID_TO"].lt(result["VALID_FROM"])
+    )
+    result["IDENTITY_EVIDENCE_STATUS"] = "PENDENTE"
+    result["IDENTITY_EVIDENCE_REASON"] = "Requer validação independente de documentos e continuidade."
+    result.loc[missing_evidence, "IDENTITY_EVIDENCE_REASON"] = "Evidência obrigatória ausente."
+    result.loc[future, "IDENTITY_EVIDENCE_REASON"] = "Documento posterior à data de formação."
+    result.loc[invalid_interval, "IDENTITY_EVIDENCE_REASON"] = "Intervalo de vínculo inválido."
+    result["STUDY_34_APPROVED"] = False
+    return result
+
+
 # SELF-TEST
 # =============================================================================
 
