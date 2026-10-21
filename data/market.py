@@ -355,6 +355,11 @@ def _save_manifest(
         "size_bytes": path.stat().st_size,
         "sha256": _sha256(path),
         "downloaded_at_utc": _utc_now_iso(),
+        "note": (
+            "COTAHIST anual pode ser atualizado; download não comprova "
+            "a versão historicamente disponível. Usar snapshot versionado "
+            "para backtests PIT."
+        ),
     }
 
     output = (
@@ -1438,6 +1443,102 @@ def save_market_universe(
         csv_path,
         json_path,
     )
+
+
+
+
+# =============================================================================
+# AUDITORIA HISTÓRICA DE LIQUIDEZ — ESTUDO DAS 34 ETAPAS
+# =============================================================================
+
+def audit_historical_liquidity(
+    history: pd.DataFrame,
+    context: PITContext,
+    *,
+    window_sessions: int,
+    minimum_average_brl: float,
+    minimum_presence: float,
+) -> pd.DataFrame:
+    """Mede liquidez sem transformar resultado em aprovação de investimento.
+
+    Os três parâmetros são explícitos: os limites definitivos precisam ser
+    confirmados na matriz metodológica das 34 etapas. Ausência de histórico
+    suficiente => PENDENTE, não REPROVADA.
+    """
+    import math
+
+    if (
+        not isinstance(window_sessions, int)
+        or isinstance(window_sessions, bool)
+        or window_sessions <= 0
+        or not math.isfinite(float(minimum_average_brl))
+        or minimum_average_brl < 0
+        or not math.isfinite(float(minimum_presence))
+        or not (0 <= minimum_presence <= 1)
+    ):
+        raise MarketDataError("Parâmetros de liquidez inválidos.")
+
+    data = filter_b3_shares(market_history_pit(history, context))
+    required = {"TICKER", "DATA_PREGAO", "VOLTOT"}
+    missing = required.difference(data.columns)
+    if missing:
+        raise MarketDataError(
+            f"FAIL-SAFE: COTAHIST sem colunas de liquidez: {sorted(missing)}"
+        )
+
+    dates = pd.to_datetime(data["DATA_PREGAO"], errors="coerce")
+    turnover = pd.to_numeric(data["VOLTOT"], errors="coerce")
+    if dates.isna().any() or turnover.isna().any():
+        raise MarketDataError("FAIL-SAFE: datas ou volumes financeiros inválidos.")
+    if (turnover < 0).any():
+        raise MarketDataError("FAIL-SAFE: volume financeiro negativo.")
+    data = data.copy()
+    data["DATA_PREGAO"] = dates.dt.normalize()
+    data["VOLTOT"] = turnover
+
+    # O calendário inferido de negócios não comprova a totalidade das
+    # sessões oficiais. A auditoria registra essa limitação.
+    sessions = sorted(data["DATA_PREGAO"].drop_duplicates())
+    if len(sessions) < window_sessions:
+        raise MarketDataError(
+            "PENDENTE: histórico agregado insuficiente para estabelecer "
+            f"{window_sessions} sessões observadas."
+        )
+    window = sessions[-window_sessions:]
+    sample = data.loc[data["DATA_PREGAO"].isin(window)].copy()
+    grouped = (
+        sample.groupby(["TICKER", "DATA_PREGAO"], as_index=False)
+        .agg(VOLTOT=("VOLTOT", "sum"))
+    )
+    metrics = (
+        grouped.groupby("TICKER", as_index=False)
+        .agg(
+            OBSERVED_SESSIONS=("DATA_PREGAO", "nunique"),
+            TOTAL_FINANCIAL_VOLUME_BRL=("VOLTOT", "sum"),
+        )
+    )
+    metrics["WINDOW_SESSIONS"] = window_sessions
+    metrics["TRADING_PRESENCE"] = (
+        metrics["OBSERVED_SESSIONS"] / window_sessions
+    )
+    # Sessões sem negociação contam como zero no denominador.
+    metrics["AVERAGE_DAILY_TURNOVER_BRL"] = (
+        metrics["TOTAL_FINANCIAL_VOLUME_BRL"] / window_sessions
+    )
+    metrics["PRESENCE_REQUIREMENT_MET"] = (
+        metrics["TRADING_PRESENCE"] >= minimum_presence
+    )
+    metrics["TURNOVER_REQUIREMENT_MET"] = (
+        metrics["AVERAGE_DAILY_TURNOVER_BRL"] >= minimum_average_brl
+    )
+    metrics["MARKET_LIQUIDITY_STATUS"] = "PENDENTE"
+    metrics["MARKET_LIQUIDITY_REASON"] = (
+        "Calendário oficial de pregões e continuidade do emissor "
+        "ainda não verificados; resultado não autoriza seleção."
+    )
+    metrics["OBSERVED_WINDOW_START"] = window[0]
+    metrics["OBSERVED_WINDOW_END"] = window[-1]
+    return metrics.sort_values("TICKER", kind="mergesort").reset_index(drop=True)
 
 
 # =============================================================================
