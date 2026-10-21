@@ -3087,6 +3087,12 @@ def _prepare_statement(
     if result.empty:
         return result
 
+    # DT_REFER é período econômico, NÃO publicação. Dados sem documento
+    # oficial verificável não podem ser considerados conhecidos no passado.
+    result = _enforce_verified_publication_pit(result, context)
+    if result.empty:
+        return result
+
     # Preferência pela coluna "ÚLTIMO", quando presente.
     if (
         result["ORDEM_CANONICAL"]
@@ -3110,6 +3116,76 @@ def _prepare_statement(
     )
 
     return result
+
+
+# =============================================================================
+# EVIDÊNCIA DE PUBLICAÇÃO — GATE PIT (ESTUDO DAS 34 ETAPAS)
+# =============================================================================
+
+def _enforce_verified_publication_pit(
+    df: pd.DataFrame,
+    context: AccountingContext,
+) -> pd.DataFrame:
+    """Admite apenas versões documentais com publicação CVM comprovada.
+
+    DT_REFER/DT_FIM_EXERC não são datas de publicação.
+    ZIP de dados correntes pode conter versões retificadas posteriormente.
+    A evidência deve ser fornecida por um coletor de documentos CVM que
+    vincule cada registro à versão documental efetivamente publicada.
+    Na ausência dessa vinculação, falha de forma fechada (sem imputação).
+    """
+    availability_candidates = (
+        "DT_PUBLICACAO_CVM_VERIFICADA",
+        "PUBLICATION_DATE_VERIFIED",
+    )
+    provenance_candidates = (
+        "PROTOCOLO_CVM_DOCUMENTO",
+        "CVM_DOCUMENT_ID",
+    )
+    availability_col = next(
+        (col for col in availability_candidates if col in df.columns), None
+    )
+    provenance_col = next(
+        (col for col in provenance_candidates if col in df.columns), None
+    )
+    if availability_col is None or provenance_col is None:
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: demonstração sem data de publicação "
+            "CVM verificada e identificador da versão documental. "
+            "DT_REFER não comprova disponibilidade. Vincular os registros "
+            "ao protocolo/documento oficial antes de executar a seleção."
+        )
+
+    raw = df[availability_col]
+    parsed = pd.to_datetime(raw, errors="coerce", utc=True)
+    if parsed.isna().any():
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: data de publicação CVM ausente ou inválida."
+        )
+    if df[provenance_col].isna().any() or (
+        df[provenance_col].astype(str).str.strip().eq("")
+    ).any():
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: versão/protocolo CVM sem identificação."
+        )
+
+    result = df.copy()
+    result["DT_PUBLICACAO_CVM_CANONICAL"] = (
+        parsed.dt.tz_convert(None).dt.normalize()
+    )
+    result["CVM_DOCUMENT_VERSION_CANONICAL"] = (
+        result[provenance_col].astype(str).str.strip()
+    )
+    # O cutoff é inclusivo somente por dia. Para decisão intradiária,
+    # a hora efetiva de publicação e negociação ainda deve ser validada.
+    eligible = (
+        result["DT_PUBLICACAO_CVM_CANONICAL"].le(context.accounting_cutoff)
+        & result["DT_PUBLICACAO_CVM_CANONICAL"].le(context.formation_date)
+        & result["DT_REFER_CANONICAL"].le(
+            result["DT_PUBLICACAO_CVM_CANONICAL"]
+        )
+    )
+    return result.loc[eligible].copy()
 
 
 # =============================================================================
@@ -4144,7 +4220,7 @@ def _self_test() -> None:
             formation_date=
                 "2026-10-05",
             accounting_cutoff=
-                "2026-06-30",
+                "2026-10-05",
         )
     )
 
@@ -4182,6 +4258,14 @@ def _self_test() -> None:
             "ORDEM_EXERC": [
                 "ÚLTIMO",
                 "ÚLTIMO",
+            ],
+            "DT_PUBLICACAO_CVM_VERIFICADA": [
+                "2026-08-15",
+                "2027-03-15",
+            ],
+            "PROTOCOLO_CVM_DOCUMENTO": [
+                "TESTE-DOCUMENTO-1",
+                "TESTE-DOCUMENTO-2",
             ],
             "STATEMENT": [
                 "BPA",
@@ -4224,6 +4308,16 @@ def _self_test() -> None:
         raise AccountingDataError(
             "SELF-TEST: valor incorreto."
         )
+
+    try:
+        _prepare_statement(
+            sample.drop(columns=["DT_PUBLICACAO_CVM_VERIFICADA"]),
+            context,
+        )
+    except AccountingPITError:
+        pass
+    else:
+        raise AssertionError("SELF-TEST: dado sem publicação foi aceito.")
 
     print("PIT: OK")
     print("Normalização: OK")
