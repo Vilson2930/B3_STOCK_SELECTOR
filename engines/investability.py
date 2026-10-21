@@ -248,6 +248,50 @@ def assert_no_future_information(
         )
 
 
+
+
+def _strict_bool_series(values: pd.Series, *, field: str) -> pd.Series:
+    """Converte booleanos explícitos; valores desconhecidos ficam pendentes."""
+    def convert(value):
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if pd.isna(value):
+            return pd.NA
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in ("true", "1", "sim"):
+                return True
+            if normalized in ("false", "0", "não", "nao"):
+                return False
+        return pd.NA
+    return values.map(convert).astype("boolean")
+
+
+def _publication_evidence(df: pd.DataFrame, context: PITContext) -> pd.Series:
+    """Sem publicação documental verificada não há PASS PIT."""
+    date_cols = ("DT_PUBLICACAO_CVM_VERIFICADA", "PUBLICATION_DATE_VERIFIED")
+    doc_cols = ("PROTOCOLO_CVM_DOCUMENTO", "CVM_DOCUMENT_ID")
+    date_col = next((x for x in date_cols if x in df.columns), None)
+    doc_col = next((x for x in doc_cols if x in df.columns), None)
+    if date_col is None or doc_col is None:
+        return pd.Series(False, index=df.index)
+    publication = pd.to_datetime(df[date_col], errors="coerce", utc=True)
+    cutoff = pd.Timestamp(context.accounting_cutoff)
+    formation = pd.Timestamp(context.formation_date)
+    if cutoff.tzinfo is None:
+        cutoff = cutoff.tz_localize("UTC")
+    if formation.tzinfo is None:
+        formation = formation.tz_localize("UTC")
+    docs = df[doc_col].astype("string")
+    return (
+        publication.notna()
+        & publication.le(cutoff)
+        & publication.le(formation)
+        & docs.notna()
+        & docs.str.strip().ne("").fillna(False)
+    ).fillna(False)
+
+
 # =============================================================================
 # PREPARAÇÃO DO UNIVERSO
 # =============================================================================
@@ -374,53 +418,8 @@ def validate_fundamental_pit(
     df: pd.DataFrame,
     context: PITContext,
 ) -> pd.Series:
-
-    cutoff_candidates = (
-        "ACCOUNTING_CUTOFF",
-        "PIT_CUTOFF",
-        "DATA_CORTE",
-        "REFERENCE_DATE",
-        "DT_REFER",
-    )
-
-    for column in cutoff_candidates:
-
-        if column not in df.columns:
-            continue
-
-        dates = pd.to_datetime(
-            df[
-                column
-            ],
-            errors="coerce",
-        )
-
-        return (
-            dates.notna()
-            &
-            (
-                dates
-                <=
-                pd.Timestamp(
-                    context.accounting_cutoff
-                )
-            )
-        )
-
-    if "PIT_VALID" in df.columns:
-
-        return (
-            df[
-                "PIT_VALID"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-    raise InvestabilityIntegrityError(
-        "FAIL-SAFE: não há evidência PIT "
-        "na base fundamental."
-    )
+    """A data de referência contábil nunca substitui a publicação oficial."""
+    return _publication_evidence(df, context)
 
 
 # =============================================================================
@@ -473,6 +472,7 @@ def fundamental_coverage(
 
 def market_identity_status(
     security_universe: pd.DataFrame,
+    context: Optional[PITContext] = None,
 ) -> pd.DataFrame:
 
     required = (
@@ -531,12 +531,22 @@ def market_identity_status(
         .notna()
     )
 
+    temp["_MARKET_VALID"] = (
+        temp["_MARKET_VALID"]
+        & pd.to_datetime(
+            temp["FORMATION_PRICE_DATE"], errors="coerce", utc=True
+        ).le(pd.Timestamp(context.market_cutoff).tz_localize("UTC")
+             if pd.Timestamp(context.market_cutoff).tzinfo is None
+             else pd.Timestamp(context.market_cutoff).tz_convert("UTC"))
+    ) if context is not None else temp["_MARKET_VALID"]
+
     temp[
         "_IDENTITY_VALID"
     ] = (
         temp[
             "IDENTITY_RESOLVED"
         ]
+        .pipe(_strict_bool_series, field="IDENTITY_RESOLVED")
         .fillna(False)
         .astype(bool)
     )
@@ -583,7 +593,8 @@ def run_investability_gate(
     )
 
     market = market_identity_status(
-        security_universe
+        security_universe,
+        context,
     )
 
     # =========================================================================
@@ -646,12 +657,8 @@ def run_investability_gate(
                 column
             ] = False
 
-        result[
-            column
-        ] = (
-            result[
-                column
-            ]
+        result[column] = (
+            _strict_bool_series(result[column], field=column)
             .fillna(False)
             .astype(bool)
         )
@@ -839,6 +846,21 @@ def run_investability_gate(
         "PASS",
         "FAIL",
     )
+
+    # =========================================================================
+    # STATUS CIENTÍFICO: NÃO CONFUNDIR TRIAGEM COM APROVAÇÃO
+    # =========================================================================
+    result["LEGACY_TECHNICAL_GATE_PASS"] = result["INVESTABLE"].copy()
+    result["STUDY_34_CRITERIA_VERIFIED"] = False
+    result["STUDY_34_STATUS"] = "PENDENTE"
+    result["STUDY_34_REASON"] = (
+        "Matriz das 34 etapas e evidências de CAPEX, FCL, dívida líquida, "
+        "ROIC/WACC e valor justo ainda não validadas integralmente."
+    )
+    # Não habilitar a seleção com a elegibilidade do robô antigo.
+    result["INVESTABLE"] = False
+    result["INVESTABILITY_STATUS"] = "PENDING"
+    result["INVESTABILITY_REASON"] = "STUDY_34_EVIDENCE_PENDING"
 
     # =========================================================================
     # METADADOS
@@ -1202,37 +1224,12 @@ def _self_test():
         )
     )
 
-    if not bool(
-        indexed.loc[
-            "1",
-            "INVESTABLE",
-        ]
-    ):
-        raise InvestabilityError(
-            "SELF-TEST: emissor 1 deveria passar."
-        )
-
-    if bool(
-        indexed.loc[
-            "2",
-            "INVESTABLE",
-        ]
-    ):
-        raise InvestabilityError(
-            "SELF-TEST: emissor 2 deveria falhar."
-        )
-
-    if (
-        indexed.loc[
-            "2",
-            "INVESTABILITY_REASON",
-        ]
-        !=
-        "FUNDAMENTAL_INCOMPLETE"
-    ):
-        raise InvestabilityError(
-            "SELF-TEST: motivo incorreto."
-        )
+    if indexed["INVESTABLE"].any():
+        raise InvestabilityError("SELF-TEST: aprovação sem evidências das 34 etapas.")
+    if not indexed["STUDY_34_STATUS"].eq("PENDENTE").all():
+        raise InvestabilityError("SELF-TEST: pendência não registrada.")
+    if indexed["FUNDAMENTAL_PIT_VALID"].any():
+        raise InvestabilityError("SELF-TEST: data de referência não é publicação.")
 
     return True
 
@@ -1251,9 +1248,9 @@ if __name__ == "__main__":
 
     print("Self-test: OK")
     print("Cobertura fundamental: OK")
-    print("PIT: VALIDADO")
-    print("Identidade: VALIDADA")
-    print("Mercado: VALIDADO")
-    print("Financeiras: CONTROLADAS")
+    print("PIT: bloqueado sem publicação CVM comprovada")
+    print("Identidade: requer evidência documental")
+    print("Mercado: testes de integração pendentes")
+    print("34 etapas: aprovação pendente")
     print("Retorno futuro: NÃO UTILIZADO")
     print("=" * 72)
