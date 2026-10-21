@@ -533,6 +533,29 @@ def prepare_fundamental_base(
                 f"Exemplos={examples}"
             )
 
+    # A data de corte declarada ou PIT_VALID não comprova publicação.
+    # A ausência da versão oficial impede a análise fundamental.
+    publication_col = "DT_PUBLICACAO_CVM_CANONICAL"
+    version_col = "CVM_DOCUMENT_VERSION_CANONICAL"
+    if publication_col not in result.columns or version_col not in result.columns:
+        raise FundamentalPITError(
+            "PENDENTE — FAIL-SAFE: sem publicação e versão documental CVM "
+            "verificadas; cutoff e PIT_VALID não bastam."
+        )
+    publication = pd.to_datetime(result[publication_col], errors="coerce", utc=True)
+    versions = result[version_col].astype("string")
+    cutoff = pd.Timestamp(context.accounting_cutoff).tz_localize("UTC")
+    formation = pd.Timestamp(context.formation_date).tz_localize("UTC")
+    if (
+        publication.isna().any()
+        or publication.gt(cutoff).any()
+        or publication.gt(formation).any()
+        or versions.isna().any()
+        or versions.str.strip().eq("").any()
+    ):
+        raise FundamentalPITError(
+            "PENDENTE — FAIL-SAFE: documento sem publicação válida no cutoff."
+        )
     return result
 
 
@@ -1150,6 +1173,10 @@ def build_fundamentals(
         )
     )
 
+    # Indicadores auxiliares; nunca substituem a auditoria documental.
+    fundamentals = calculate_verified_financial_evidence(fundamentals)
+
+
     coverage = (
         calculate_factor_coverage(
             fundamentals
@@ -1218,6 +1245,71 @@ def build_fundamentals(
         fundamentals,
         coverage,
     )
+
+
+
+# =============================================================================
+# EVIDÊNCIAS FINANCEIRAS — SEM APROVAÇÃO AUTOMÁTICA
+# =============================================================================
+
+def calculate_verified_financial_evidence(df: pd.DataFrame) -> pd.DataFrame:
+    """Calcula indicadores somente quando insumos e origem estão comprovados.
+
+    Convenções exigidas dos coletores:
+      CAPEX_SAIDA_CAIXA: desembolso POSITIVO (não saldo contábil do imobilizado)
+      FCO: fluxo operacional do período
+      DIVIDA_BRUTA: obrigações financeiras identificadas sem duplicação
+      CAIXA: disponibilidades verificadas
+      NOPAT: lucro operacional após impostos, calculado com base consistente
+      CAPITAL_INVESTIDO: capital operacional investido com conciliação
+      WACC: custo médio ponderado do capital, calculado e rastreável
+
+    Evidência individual por insumo: <COLUNA>_VERIFICADA = True (booleano),
+    fornecida por auditoria documental independente. Flags textuais NÃO passam.
+    Falta de evidência resulta em NaN e PENDENTE, nunca em zero estimado.
+    """
+    result = df.copy()
+    metrics = {
+        "FCF_VERIFICADO": ("FCO", "CAPEX_SAIDA_CAIXA"),
+        "DIVIDA_LIQUIDA_VERIFICADA": ("DIVIDA_BRUTA", "CAIXA"),
+        "ROIC_VERIFICADO": ("NOPAT", "CAPITAL_INVESTIDO"),
+        "SPREAD_ROIC_WACC_VERIFICADO": (
+            "NOPAT", "CAPITAL_INVESTIDO", "WACC"
+        ),
+    }
+    for target, sources in metrics.items():
+        result[target] = np.nan
+        result[target + "_STATUS"] = "PENDENTE"
+        eligible = pd.Series(True, index=result.index, dtype=bool)
+        values = {}
+        for name in sources:
+            flag = name + "_VERIFICADA"
+            if name not in result.columns or flag not in result.columns:
+                eligible &= False
+                continue
+            # Somente booleanos reais: 'True' e 1 não são prova documental.
+            evidence = result[flag].map(lambda x: isinstance(x, (bool, np.bool_)) and bool(x))
+            number = pd.to_numeric(result[name], errors="coerce")
+            eligible &= evidence & number.notna() & np.isfinite(number)
+            values[name] = number
+        if len(values) != len(sources):
+            continue
+        if target == "FCF_VERIFICADO":
+            eligible &= values["CAPEX_SAIDA_CAIXA"].ge(0)
+            computed = values["FCO"] - values["CAPEX_SAIDA_CAIXA"]
+        elif target == "DIVIDA_LIQUIDA_VERIFICADA":
+            eligible &= values["DIVIDA_BRUTA"].ge(0) & values["CAIXA"].ge(0)
+            computed = values["DIVIDA_BRUTA"] - values["CAIXA"]
+        else:
+            eligible &= values["CAPITAL_INVESTIDO"].gt(0)
+            computed = values["NOPAT"] / values["CAPITAL_INVESTIDO"].replace(0, np.nan)
+            if target == "SPREAD_ROIC_WACC_VERIFICADO":
+                computed = computed - values["WACC"]
+        result.loc[eligible, target] = computed.loc[eligible]
+        result.loc[eligible, target + "_STATUS"] = "CALCULADO_COM_EVIDENCIA_DECLARADA"
+    result["ESTUDO_34_ETAPAS_STATUS"] = "PENDENTE"
+    result["ESTUDO_34_ETAPAS_APROVACAO_AUTOMATICA"] = False
+    return result
 
 
 # =============================================================================
