@@ -296,11 +296,17 @@ def parse_date_column(
             f"Coluna de data ausente: {column}"
         )
 
-    parsed = pd.to_datetime(
-        df[column],
-        errors="coerce",
-        dayfirst=False,
-    )
+    try:
+        parsed = pd.to_datetime(
+            df[column], errors="coerce", dayfirst=False,
+        )
+        # Recusar datas sem representação temporal homogênea.
+        if not pd.api.types.is_datetime64_any_dtype(parsed):
+            raise ValueError("datas com formatos/fusos incompatíveis")
+    except (TypeError, ValueError) as exc:
+        raise PITDataError(
+            f"FAIL-SAFE: datas incompatíveis em {dataset_name}.{column}"
+        ) from exc
 
     invalid = (
         df[column].notna()
@@ -372,15 +378,15 @@ def filter_available_by_date(
         dataset_name,
     )
 
-    future_mask = (
-        result["__PIT_AVAILABILITY_DATE"]
-        >
-        cutoff
+    # FAIL-SAFE: NaT não pode ser tratado como informação conhecida.
+    # A coluna deve representar publicação/disponibilidade comprovada,
+    # jamais apenas a data de encerramento do balanço.
+    valid_mask = (
+        result["__PIT_AVAILABILITY_DATE"].notna()
+        & result["__PIT_AVAILABILITY_DATE"].le(cutoff)
     )
 
-    result = result.loc[
-        ~future_mask
-    ].copy()
+    result = result.loc[valid_mask].copy()
 
     return result
 
@@ -445,15 +451,12 @@ def filter_accounting_pit(
 
         # Um período econômico posterior ao cutoff
         # também não pode entrar.
-        invalid_reference = (
-            result["__PIT_REFERENCE_DATE"]
-            >
-            context.accounting_cutoff
+        valid_reference = (
+            result["__PIT_REFERENCE_DATE"].notna()
+            & result["__PIT_REFERENCE_DATE"].le(context.accounting_cutoff)
         )
 
-        result = result.loc[
-            ~invalid_reference
-        ].copy()
+        result = result.loc[valid_reference].copy()
 
     return result
 
@@ -489,15 +492,12 @@ def filter_market_pit(
         dataset_name,
     )
 
-    future_mask = (
-        result["__PIT_MARKET_DATE"]
-        >
-        context.market_cutoff
+    valid_mask = (
+        result["__PIT_MARKET_DATE"].notna()
+        & result["__PIT_MARKET_DATE"].le(context.market_cutoff)
     )
 
-    result = result.loc[
-        ~future_mask
-    ].copy()
+    result = result.loc[valid_mask].copy()
 
     return result
 
@@ -571,6 +571,13 @@ def latest_available_record(
         sort_columns.append(
             "__PIT_REFERENCE_DATE"
         )
+
+    # Não permitir referência desconhecida ou posterior ao corte.
+    if reference_column:
+        result = result.loc[
+            result["__PIT_REFERENCE_DATE"].notna()
+            & result["__PIT_REFERENCE_DATE"].le(normalize_date(cutoff, "cutoff"))
+        ].copy()
 
     result = result.sort_values(
         sort_columns,
@@ -748,9 +755,8 @@ def audit_no_lookahead(
             dataset_name,
         )
 
-        violation = (
-            parsed > cutoff
-        )
+        # Data ausente também é violação: não há prova de disponibilidade.
+        violation = parsed.isna() | parsed.gt(cutoff)
 
         count = int(
             violation.sum()
@@ -965,6 +971,36 @@ def _self_test():
         raise PITLookAheadError(
             "SELF-TEST FALHOU: dado futuro entrou no PIT."
         )
+
+    # Testes de regressão: datas ausentes e posteriores não sobrevivem.
+    missing = sample.copy()
+    missing.loc[0, "AVAILABLE_DATE"] = None
+    missing.loc[1, "REFERENCE_DATE"] = None
+    checked = filter_accounting_pit(
+        missing, context,
+        availability_column="AVAILABLE_DATE",
+        reference_column="REFERENCE_DATE",
+        dataset_name="SELF_TEST_MISSING",
+    )
+    if checked["ISSUER_ID"].eq(1).any():
+        raise PITLookAheadError("SELF-TEST: datas contábeis ausentes sobreviveram.")
+
+    market = pd.DataFrame({
+        "TICKER": ["AAA3", "BBB3", "CCC3"],
+        "DATE": ["2018-09-28", None, "2018-10-01"],
+    })
+    market_checked = filter_market_pit(
+        market, context, date_column="DATE", dataset_name="SELF_TEST_MARKET"
+    )
+    if market_checked["TICKER"].tolist() != ["AAA3"]:
+        raise PITLookAheadError("SELF-TEST: data de mercado inválida sobreviveu.")
+
+    audit = audit_no_lookahead(
+        market, date_columns=["DATE"], cutoff=context.market_cutoff,
+        dataset_name="SELF_TEST_AUDIT",
+    )
+    if audit["passed"] or audit["violations"]["DATE"] != 2:
+        raise PITLookAheadError("SELF-TEST: auditoria ignorou data ausente/futura.")
 
     return True
 
