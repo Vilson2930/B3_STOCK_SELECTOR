@@ -119,12 +119,17 @@ jobs:
           test -f auditoria_cvm_pit_fase7.py
           python auditoria_cvm_pit_fase7.py
 
+      - name: Diagnosticar XMLs e comparar versoes distintas - fase 8
+        run: |
+          test -f auditoria_cvm_pit_fase8.py
+          python auditoria_cvm_pit_fase8.py
+
       - name: Verificar geracao dos relatorios
         if: always()
         shell: bash
         run: |
           set -e
-          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase7_documentos.csv fase7_valores_xml.csv fase7_comparacoes_candidatas.csv fase7_alertas.csv fase7_resumo.json; do
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase7_documentos.csv fase7_valores_xml.csv fase7_comparacoes_candidatas.csv fase7_alertas.csv fase7_resumo.json fase8_documentos.csv fase8_tags_xml.csv fase8_comparacoes_entre_versoes.csv fase8_alertas.csv fase8_resumo.json; do
             caminho="outputs/cvm_pit_audit/$arquivo"
             if test -f "$caminho"; then
               echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
@@ -166,5 +171,10 @@ jobs:
             outputs/cvm_pit_audit/fase7_comparacoes_candidatas.csv
             outputs/cvm_pit_audit/fase7_alertas.csv
             outputs/cvm_pit_audit/fase7_resumo.json
+            outputs/cvm_pit_audit/fase8_documentos.csv
+            outputs/cvm_pit_audit/fase8_tags_xml.csv
+            outputs/cvm_pit_audit/fase8_comparacoes_entre_versoes.csv
+            outputs/cvm_pit_audit/fase8_alertas.csv
+            outputs/cvm_pit_audit/fase8_resumo.json
           if-no-files-found: error
           retention-days: 30
