@@ -773,6 +773,108 @@ def local_status() -> pd.DataFrame:
 
 
 # =============================================================================
+# REGISTRO DOCUMENTAL PIT — CAMADA DE EVIDÊNCIAS (34 ETAPAS)
+# =============================================================================
+# Este módulo NÃO presume que DT_REFER, VERSAO ou a data do download
+# sejam prova de publicação. Um índice documental independente e auditado
+# deve ser obtido dos registros oficiais da CVM. O registro abaixo é apenas
+# um contrato de ingestão e validação, não um coletor online já homologado.
+
+PUBLICATION_REGISTRY_DIR = CVM_DIR / "publication_registry"
+PUBLICATION_REGISTRY_DIR.mkdir(parents=True, exist_ok=True)
+
+PUBLICATION_REGISTRY_REQUIRED = (
+    "SOURCE_DATASET", "CNPJ_CIA", "DT_REFER", "VERSAO",
+    "DT_PUBLICACAO_CVM_VERIFICADA", "PROTOCOLO_CVM_DOCUMENTO",
+    "URL_DOCUMENTO_CVM", "EVIDENCIA_ORIGEM",
+)
+
+
+def _normalize_cnpj_registry(value) -> str:
+    import re
+    if pd.isna(value):
+        raise CVMDataError("PENDENTE: CNPJ ausente no registro documental.")
+    digits = re.sub(r"\D", "", str(value))
+    if len(digits) != 14:
+        raise CVMDataError("PENDENTE: CNPJ inválido no registro documental.")
+    return digits
+
+
+def load_publication_registry(path: str | Path) -> pd.DataFrame:
+    """Lê evidências documentais externas, sem inventar datas ou versões.
+
+    O CSV deve ser previamente construído e auditado a partir de documentos
+    oficiais da CVM. A função verifica formato, unicidade e consistência;
+    NÃO certifica, por si só, que uma URL/protocolo é autêntico.
+
+    Chave de ligação: SOURCE_DATASET, CNPJ_CIA, DT_REFER, VERSAO.
+    Não utilizar o resultado como PIT_VALID até conferir a fonte original.
+    """
+    source = Path(path)
+    if not source.is_file():
+        raise CVMDataError(
+            f"PENDENTE: registro de publicações CVM não encontrado: {source}"
+        )
+    if source.suffix.lower() != ".csv":
+        raise CVMDataError("Registro de publicações deve ser CSV.")
+    try:
+        df = pd.read_csv(source, dtype=str, sep=None, engine="python", encoding="utf-8-sig")
+    except Exception as exc:
+        raise CVMDataError("Falha na leitura do registro documental CVM.") from exc
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    missing = sorted(set(PUBLICATION_REGISTRY_REQUIRED) - set(df.columns))
+    if missing:
+        raise CVMDataError(f"PENDENTE: campos documentais ausentes: {missing}")
+    if df.empty:
+        raise CVMDataError("PENDENTE: registro documental CVM vazio.")
+    for col in PUBLICATION_REGISTRY_REQUIRED:
+        if df[col].isna().any() or df[col].str.strip().eq("").any():
+            raise CVMDataError(f"PENDENTE: valor documental ausente em {col}.")
+        df[col] = df[col].str.strip()
+    df["SOURCE_DATASET"] = df["SOURCE_DATASET"].str.upper()
+    if (~df["SOURCE_DATASET"].isin(("DFP", "ITR"))).any():
+        raise CVMDataError("Registro PIT só admite DFP ou ITR.")
+    df["CNPJ_CIA"] = df["CNPJ_CIA"].map(_normalize_cnpj_registry)
+    df["DT_REFER"] = pd.to_datetime(df["DT_REFER"], errors="coerce", format="%Y-%m-%d")
+    df["DT_PUBLICACAO_CVM_VERIFICADA"] = pd.to_datetime(
+        df["DT_PUBLICACAO_CVM_VERIFICADA"], errors="coerce", utc=True,
+    )
+    if df["DT_REFER"].isna().any() or df["DT_PUBLICACAO_CVM_VERIFICADA"].isna().any():
+        raise CVMDataError("PENDENTE: datas documentais inválidas; use ISO 8601.")
+    if (df["DT_PUBLICACAO_CVM_VERIFICADA"].dt.tz_localize(None).dt.normalize() < df["DT_REFER"]).any():
+        raise CVMDataError("PENDENTE: publicação anterior à referência contábil.")
+    from urllib.parse import urlparse
+    for url in df["URL_DOCUMENTO_CVM"]:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme != "https" or not (host == "cvm.gov.br" or host.endswith(".cvm.gov.br")):
+            raise CVMDataError("PENDENTE: URL de evidência fora do domínio oficial CVM.")
+    key = ["SOURCE_DATASET", "CNPJ_CIA", "DT_REFER", "VERSAO"]
+    if df.duplicated(key).any():
+        raise CVMDataError("PENDENTE: chave documental duplicada no registro CVM.")
+    df.attrs["registry_sha256"] = _sha256(source)
+    df.attrs["registry_file"] = str(source)
+    df.attrs["verification_limit"] = (
+        "Estrutura validada; autenticidade e correspondência com documentos "
+        "originais CVM ainda requerem auditoria independente."
+    )
+    return df
+
+
+def publication_registry_status(path: str | Path) -> dict:
+    """Retorna inventário auditável sem alegar certificação documental."""
+    frame = load_publication_registry(path)
+    return {
+        "rows": int(len(frame)),
+        "sha256": frame.attrs["registry_sha256"],
+        "file": frame.attrs["registry_file"],
+        "source_authenticated": False,
+        "pit_approved": False,
+        "status": "PENDENTE_AUDITORIA_DOCUMENTAL",
+    }
+
+
+# =============================================================================
 # TESTE DO MÓDULO
 # =============================================================================
 
