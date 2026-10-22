@@ -31,7 +31,7 @@
 # REGRAS:
 # - sem look-ahead;
 # - retorno futuro proibido;
-# - somente o modelo do estudo MB 100% autorizado pode entrar no ranking;
+# - seleção exige evidência integral das 34 etapas; o modelo MB 100% não é autorizado;
 # - uma empresa = um emissor na análise fundamental;
 # - execução determinística;
 # - fail-safe;
@@ -994,25 +994,13 @@ def run_universe_stage(
         dict,
     ):
 
-        security_universe = (
-            result.get(
-                "security_universe"
-            )
-            or
-            result.get(
-                "securities"
-            )
-        )
+        security_universe = result.get("security_universe")
+        if security_universe is None:
+            security_universe = result.get("securities")
 
-        issuer_universe = (
-            result.get(
-                "issuer_universe"
-            )
-            or
-            result.get(
-                "issuers"
-            )
-        )
+        issuer_universe = result.get("issuer_universe")
+        if issuer_universe is None:
+            issuer_universe = result.get("issuers")
 
     elif (
         isinstance(
@@ -1932,402 +1920,115 @@ def run_pipeline(
     )
 
     # -------------------------------------------------------------------------
-    # RANKING
+    # ESTUDO CIENTÍFICO DAS 34 ETAPAS — FECHAMENTO DE AUDITORIA
     # -------------------------------------------------------------------------
+    # Os cinco motores anteriores podem produzir indicadores de pesquisa.
+    # Isso não constitui aprovação de investimento. As etapas 30–34 do
+    # estudo registraram lacunas de evidência em CAPEX, FCL, dívida líquida,
+    # ROIC/WACC e valor justo. Não se inventam limiares nem aprovações.
+    # O pipeline salva os resultados para auditoria e termina PENDENTE,
+    # sem chamar ranking, risco de carteira ou relatório de recomendações.
+    for stage_name, stage_df in (
+        ("FUNDAMENTALS", fundamentals),
+        ("INVESTABILITY", investability),
+        ("QUALITY", quality),
+        ("TURNAROUND", turnaround),
+        ("VALUATION", valuation),
+    ):
+        require_dataframe(stage_df, stage_name)
+        assert_no_future_information(stage_df, stage_name)
 
-    ranking = run_ranking_stage(
-        quality=quality,
-        valuation=valuation,
-        turnaround=turnaround,
-        context=context,
+    pending_reasons = (
+        "Comprovação documental integral das 34 etapas ainda pendente: "
+        "CAPEX, fluxo de caixa livre, dívida líquida, ROIC/WACC e valor justo."
     )
-
-    # -------------------------------------------------------------------------
-    # RISK
-    # -------------------------------------------------------------------------
-
-    risk = run_risk_stage(
-        ranking,
-        context,
-    )
-
-    # -------------------------------------------------------------------------
-    # AUDITORIA GLOBAL ANTES DO REPORT
-    # -------------------------------------------------------------------------
-
-    audit = build_global_audit(
-        context=context,
-        security_universe=security_universe,
-        issuer_universe=issuer_universe,
-        investability=investability,
-        fundamentals=fundamentals,
-        quality=quality,
-        turnaround=turnaround,
-        valuation=valuation,
-        ranking=ranking,
-        risk=risk,
-    )
-
-    if audit[
-        "future_return_used"
-    ]:
-
-        raise PipelineIntegrityError(
-            "FAIL-SAFE: retorno futuro utilizado."
-        )
-
-    # O score MB 100% do estudo pode entrar no Ranking quando sua
-    # integridade já foi validada pelo Ranking Engine e pelo Risk Engine.
-    # O main não recalcula o modelo; apenas confirma os metadados finais.
-    if audit[
-        "turnaround_research_used_in_ranking"
-    ]:
-
-        required_study_columns = {
-            "RANKING_MODEL",
-            "MARGEM_BRUTA_WEIGHT",
-            "MARGEM_LIQUIDA_WEIGHT",
-            "ROE_WEIGHT",
-        }
-
-        missing_study_columns = (
-            required_study_columns
-            - set(ranking.columns)
-        )
-
-        if missing_study_columns:
-            raise PipelineIntegrityError(
-                "FAIL-SAFE: score do estudo entrou no ranking sem "
-                f"metadados obrigatórios: {sorted(missing_study_columns)}"
-            )
-
-        used_mask = (
-            ranking[
-                "TURNAROUND_RESEARCH_USED_IN_RANKING"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-        models = (
-            ranking.loc[
-                used_mask,
-                "RANKING_MODEL",
-            ]
-            .dropna()
-            .astype(str)
-            .str.strip()
-            .unique()
-            .tolist()
-        )
-
-        if models != ["MB_100_STUDY"]:
-            raise PipelineIntegrityError(
-                "FAIL-SAFE: modelo fundamental não autorizado "
-                f"detectado no ranking: {models}"
-            )
-
-        expected_weights = {
-            "MARGEM_BRUTA_WEIGHT": 1.00,
-            "MARGEM_LIQUIDA_WEIGHT": 0.00,
-            "ROE_WEIGHT": 0.00,
-        }
-
-        for column, expected in expected_weights.items():
-
-            values = pd.to_numeric(
-                ranking.loc[
-                    used_mask,
-                    column,
-                ],
-                errors="coerce",
-            )
-
-            if values.isna().any():
-                raise PipelineIntegrityError(
-                    "FAIL-SAFE: peso ausente/inválido no ranking: "
-                    f"{column}"
-                )
-
-            if not (
-                (values - expected).abs() <= 1e-12
-            ).all():
-                raise PipelineIntegrityError(
-                    "FAIL-SAFE: peso divergente do estudo no ranking: "
-                    f"{column}; esperado={expected}."
-                )
-
-        for column in (
-            "QUALITY_WEIGHT",
-            "VALUATION_WEIGHT",
-        ):
-            if column in ranking.columns:
-
-                values = pd.to_numeric(
-                    ranking.loc[
-                        used_mask,
-                        column,
-                    ],
-                    errors="coerce",
-                )
-
-                if (
-                    values.isna().any()
-                    or not (
-                        values.abs() <= 1e-12
-                    ).all()
-                ):
-                    raise PipelineIntegrityError(
-                        "FAIL-SAFE: peso legado diferente de zero "
-                        f"detectado em {column}."
-                    )
-
-    # -------------------------------------------------------------------------
-    # REPORT
-    # -------------------------------------------------------------------------
-
-    report_files = run_report_stage(
-        risk,
-        context,
-    )
-
-    # -------------------------------------------------------------------------
-    # SALVA OUTPUTS DOS MOTORES
-    # -------------------------------------------------------------------------
-
     stage_files = {}
-
-    stage_files[
-        "universe"
-    ] = save_stage_if_supported(
-        universe_module,
-        (
-            "save_universe",
-        ),
-        issuer_universe,
-        context,
+    stage_files["universe"] = save_stage_if_supported(
+        universe_module, ("save_universe",), issuer_universe, context
     )
-
-    stage_files[
-        "investability"
-    ] = save_stage_if_supported(
-        investability_module,
-        (
-            "save_investability",
-        ),
-        investability,
-        context,
+    stage_files["investability"] = save_stage_if_supported(
+        investability_module, ("save_investability",), investability, context
     )
-
     save_fundamentals_function = resolve_callable(
-        fundamentals_module,
-        (
-            "save_fundamentals",
-        ),
-        required=False,
+        fundamentals_module, ("save_fundamentals",), required=False
     )
-
     if save_fundamentals_function is not None:
-        stage_files[
-            "fundamentals"
-        ] = call_stage(
-            "FUNDAMENTALS_SAVE",
-            save_fundamentals_function,
-            [
-                (
-                    (
-                        fundamentals,
-                        fundamental_coverage,
-                        context,
-                    ),
-                    {},
-                ),
-                (
-                    (),
-                    {
-                        "fundamentals": fundamentals,
-                        "coverage": fundamental_coverage,
-                        "context": context,
-                    },
-                ),
-            ],
+        stage_files["fundamentals"] = call_stage(
+            "FUNDAMENTALS_SAVE", save_fundamentals_function,
+            [((fundamentals, fundamental_coverage, context), {}),
+             ((), {"fundamentals": fundamentals,
+                   "coverage": fundamental_coverage, "context": context})],
         )
     else:
-        stage_files[
-            "fundamentals"
-        ] = None
+        stage_files["fundamentals"] = None
+    for stage_name, module, dataframe, save_name in (
+        ("quality", quality_module, quality, "save_quality"),
+        ("turnaround", turnaround_module, turnaround, "save_turnaround"),
+        ("valuation", valuation_module, valuation, "save_valuation"),
+    ):
+        stage_files[stage_name] = save_stage_if_supported(
+            module, (save_name,), dataframe, context
+        )
 
-    stage_files[
-        "quality"
-    ] = save_stage_if_supported(
-        quality_module,
-        (
-            "save_quality",
-        ),
-        quality,
-        context,
-    )
-
-    stage_files[
-        "turnaround"
-    ] = save_stage_if_supported(
-        turnaround_module,
-        (
-            "save_turnaround",
-        ),
-        turnaround,
-        context,
-    )
-
-    stage_files[
-        "valuation"
-    ] = save_stage_if_supported(
-        valuation_module,
-        (
-            "save_valuation",
-        ),
-        valuation,
-        context,
-    )
-
-    stage_files[
-        "ranking"
-    ] = save_stage_if_supported(
-        ranking_module,
-        (
-            "save_ranking",
-        ),
-        ranking,
-        context,
-    )
-
-    stage_files[
-        "risk"
-    ] = save_stage_if_supported(
-        risk_module,
-        (
-            "save_risk",
-        ),
-        risk,
-        context,
-    )
-
-    # -------------------------------------------------------------------------
-    # MANIFESTO FINAL
-    # -------------------------------------------------------------------------
-
+    audit = {
+        "formation_date": str(context.formation_date.date()),
+        "accounting_cutoff": str(context.accounting_cutoff.date()),
+        "market_cutoff": str(context.market_cutoff.date()),
+        "security_universe": int(len(security_universe)),
+        "issuer_universe": int(len(issuer_universe)),
+        "investability_rows": int(len(investability)),
+        "fundamental_rows": int(len(fundamentals)),
+        "quality_rows": int(len(quality)),
+        "turnaround_rows": int(len(turnaround)),
+        "valuation_rows": int(len(valuation)),
+        "ranking_rows": 0,
+        "ranking_eligible": 0,
+        "selected_positions": 0,
+        "portfolio_weight": 0.0,
+        "future_return_used": False,
+        "turnaround_research_used_in_ranking": False,
+        "study_34_status": "PENDENTE",
+        "study_34_approval_count": 0,
+        "study_34_pending_reason": pending_reasons,
+        "recommendations_authorized": False,
+    }
     finished_at = utc_now()
-
     manifest = {
-        "project":
-            PROJECT_NAME,
-
-        "version":
-            VERSION,
-
-        "pipeline_version":
-            "0.3.0",
-
-        "status":
-            "SUCCESS",
-
-        "started_at_utc":
-            started_at.isoformat(),
-
-        "finished_at_utc":
-            finished_at.isoformat(),
-
-        "duration_seconds":
-            float(
-                (
-                    finished_at
-                    -
-                    started_at
-                ).total_seconds()
-            ),
-
-        "audit":
-            audit,
-
-        "report_files": {
-            key:
-                str(value)
-
-            for key, value
-            in report_files.items()
-        },
-
+        "project": PROJECT_NAME,
+        "version": VERSION,
+        "pipeline_version": "0.4.0-study34-audit-only",
+        "status": "PENDING_EVIDENCE",
+        "started_at_utc": started_at.isoformat(),
+        "finished_at_utc": finished_at.isoformat(),
+        "duration_seconds": (finished_at - started_at).total_seconds(),
+        "audit": audit,
+        "report_files": {},
         "stage_files": {
-            key:
-                str(value)
-
-            for key, value
-            in stage_files.items()
-
+            key: str(value) for key, value in stage_files.items()
             if value is not None
         },
     }
-
-    manifest_path = save_run_manifest(
-        manifest,
-        context.formation_date,
-    )
-
-    # -------------------------------------------------------------------------
-    # RESULTADO
-    # -------------------------------------------------------------------------
-
+    manifest_path = save_run_manifest(manifest, context.formation_date)
+    empty = pd.DataFrame()
     return {
-        "context":
-            context,
-
-        "market_universe":
-            market_universe,
-
-        "security_universe":
-            security_universe,
-
-        "issuer_universe":
-            issuer_universe,
-
-        "share_classes":
-            share_classes,
-
-        "issuer_market_cap":
-            issuer_market_cap,
-
-        "investability":
-            investability,
-
-        "fundamentals":
-            fundamentals,
-
-        "fundamental_coverage":
-            fundamental_coverage,
-
-        "quality":
-            quality,
-
-        "turnaround":
-            turnaround,
-
-        "valuation":
-            valuation,
-
-        "ranking":
-            ranking,
-
-        "risk":
-            risk,
-
-        "audit":
-            audit,
-
-        "report_files":
-            report_files,
-
-        "manifest":
-            manifest_path,
+        "context": context,
+        "market_universe": market_universe,
+        "security_universe": security_universe,
+        "issuer_universe": issuer_universe,
+        "share_classes": share_classes,
+        "issuer_market_cap": issuer_market_cap,
+        "investability": investability,
+        "fundamentals": fundamentals,
+        "fundamental_coverage": fundamental_coverage,
+        "quality": quality,
+        "turnaround": turnaround,
+        "valuation": valuation,
+        "ranking": empty.copy(),
+        "risk": empty.copy(),
+        "audit": audit,
+        "report_files": {},
+        "manifest": manifest_path,
+        "status": "PENDING_EVIDENCE",
     }
 
 
@@ -2524,7 +2225,7 @@ def print_run_summary(
     )
 
     print("=" * 78)
-    print("PIPELINE FINALIZADO COM SUCESSO")
+    print("PIPELINE DE AUDITORIA FINALIZADO — ESTUDO 34 PENDENTE")
     print("=" * 78)
 
 
