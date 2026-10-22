@@ -109,12 +109,17 @@ jobs:
       - name: Executar auditoria independente
         run: python auditoria_cvm_pit.py
 
+      - name: Executar auditoria PIT fase 3 (sem homologacao)
+        run: |
+          test -f auditoria_cvm_pit_fase3.py
+          python auditoria_cvm_pit_fase3.py
+
       - name: Verificar geracao dos relatorios
         if: always()
         shell: bash
         run: |
           set -e
-          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv; do
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv; do
             caminho="outputs/cvm_pit_audit/$arquivo"
             if test -f "$caminho"; then
               echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
@@ -145,5 +150,11 @@ jobs:
             outputs/cvm_pit_audit/documentos.csv
             outputs/cvm_pit_audit/correspondencias.csv
             outputs/cvm_pit_audit/anomalias.csv
+            outputs/cvm_pit_audit/fase3_resumo.json
+            outputs/cvm_pit_audit/fase3_links_identificadores.csv
+            outputs/cvm_pit_audit/fase3_divergencias.csv
+            outputs/cvm_pit_audit/fase3_versoes.csv
+            outputs/cvm_pit_audit/fase3_cortes_historicos.csv
+            outputs/cvm_pit_audit/fase3_alertas.csv
           if-no-files-found: error
           retention-days: 30
