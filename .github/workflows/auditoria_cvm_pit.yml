@@ -114,12 +114,17 @@ jobs:
           test -f auditoria_cvm_pit_fase3.py
           python auditoria_cvm_pit_fase3.py
 
+      - name: Sondar documentos CVM ENET - fase 4 sem homologacao
+        run: |
+          test -f auditoria_cvm_pit_fase4.py
+          python auditoria_cvm_pit_fase4.py
+
       - name: Verificar geracao dos relatorios
         if: always()
         shell: bash
         run: |
           set -e
-          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv; do
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase4_sondagens_enet.csv fase4_resumo.json; do
             caminho="outputs/cvm_pit_audit/$arquivo"
             if test -f "$caminho"; then
               echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
@@ -156,5 +161,7 @@ jobs:
             outputs/cvm_pit_audit/fase3_versoes.csv
             outputs/cvm_pit_audit/fase3_cortes_historicos.csv
             outputs/cvm_pit_audit/fase3_alertas.csv
+            outputs/cvm_pit_audit/fase4_sondagens_enet.csv
+            outputs/cvm_pit_audit/fase4_resumo.json
           if-no-files-found: error
           retention-days: 30
