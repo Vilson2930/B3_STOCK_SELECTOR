@@ -1,293 +1,192 @@
-"""B3 STOCK SELECTOR — auditoria documental exploratória CVM, somente leitura.
+"""B3 STOCK SELECTOR — fase 3: auditoria PIT exploratoria, estritamente read-only.
 
-Executar: python auditoria_cvm_pit.py
-Entrada: data/cvm/raw/{dfp,itr}_cia_aberta_{2021..2025}.zip
-Saídas: outputs/cvm_pit_audit/{inventario.csv,resumo.json,documentos.csv,
-        correspondencias.csv,anomalias.csv}.
-
-NÃO autentica publicação, NÃO produz publication_registry.csv e NÃO libera PIT.
-Os vínculos com tickers são apenas candidatos por denominação, nunca identidade
-jurídica definitiva. Datas de recebimento não são automaticamente datas de
-publicação ou disponibilidade pública.
+Consome outputs/cvm_pit_audit/{documentos,correspondencias}.csv produzidos pelo
+auditoria_cvm_pit.py. Nao consulta rede, nao autentica documento, nao cria
+publication_registry.csv e NUNCA promove PIT_VALID. Execucao independente:
+    python auditoria_cvm_pit_fase3.py
 """
 from __future__ import annotations
 
 import csv
-import hashlib
-import io
 import json
 import re
-import unicodedata
-import zipfile
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
-DATA = ROOT / 'data' / 'cvm' / 'raw'
-OUTPUT = ROOT / 'outputs' / 'cvm_pit_audit'
-DATASETS = ('DFP', 'ITR')
-YEARS = range(2021, 2026)
-TOKENS = ('REFER', 'VERSAO', 'RECEB', 'ENTREG', 'PUBLIC', 'PROTOC', 'DOCUMENT', 'LINK', 'URL', 'NUM_SEQ')
-MAIN_FIELDS = ('CNPJ_CIA', 'DENOM_CIA', 'DT_REFER', 'VERSAO', 'DT_RECEB', 'LINK_DOC')
-DOCUMENT_FIELDS = ('dataset', 'year', 'source_file', 'ticker_candidate', 'denom_cia',
-                   'cnpj_cia', 'dt_refer', 'versao', 'dt_receb', 'link_doc',
-                   'link_official_domain', 'document_key', 'row_number', 'status')
-MATCH_FIELDS = ('dataset', 'year', 'ticker_candidate', 'cnpj_cia', 'dt_refer',
-                'versao', 'source_file', 'main_rows', 'accounting_rows',
-                'accounting_files', 'status')
-ANOMALY_FIELDS = ('dataset', 'year', 'source_file', 'row_number', 'issue', 'details')
-
-# Correspondências textuais exploratórias: não substituem cadastro oficial B3/CVM.
-COMPANIES = {
-    'TOTS3': ('TOTVS',),
-    'B3SA3': ('B3 S A BRASIL BOLSA BALCAO', 'B3 BRASIL BOLSA BALCAO'),
-    'FLRY3': ('FLEURY',),
-    'TGMA3': ('TEGMA',),
-    'YDUQ3': ('YDUQS', 'YDUQ'),
-}
+OUT = ROOT / 'outputs' / 'cvm_pit_audit'
+EXPECTED = {'DFP', 'ITR'}
+OFFICIAL_HOSTS = {'rad.cvm.gov.br', 'www.rad.cvm.gov.br'}
 
 
-def normalize(value: str) -> str:
-    value = unicodedata.normalize('NFKD', str(value or ''))
-    value = ''.join(c for c in value if not unicodedata.combining(c))
-    return re.sub(r'[^A-Z0-9]+', ' ', value.upper()).strip()
+def read_csv(filename: str) -> list[dict]:
+    path = OUT / filename
+    if not path.is_file():
+        raise FileNotFoundError(f'Relatorio da fase 2 ausente: {path}')
+    with path.open(newline='', encoding='utf-8-sig') as file:
+        return list(csv.DictReader(file))
 
 
-def ticker_candidate(name: str) -> str:
-    norm = normalize(name)
-    matches = [ticker for ticker, aliases in COMPANIES.items()
-               if any(norm == alias or norm.startswith(alias + ' ') for alias in aliases)]
-    return matches[0] if len(matches) == 1 else ''
-
-
-def digest(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open('rb') as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b''):
-            h.update(block)
-    return h.hexdigest()
-
-
-def open_csv(archive: zipfile.ZipFile, member: str):
-    raw = archive.open(member)
-    # Os CSVs oficiais frequentemente usam Latin-1; UTF-8 tem prioridade.
-    sample = raw.read(8192)
-    raw.close()
-    encoding = 'utf-8-sig'
-    try:
-        sample.decode(encoding)
-    except UnicodeError:
-        encoding = 'latin1'
-    binary = archive.open(member)
-    text = io.TextIOWrapper(binary, encoding=encoding, newline='', errors='replace')
-    return text
-
-
-def valid_date(value: str) -> bool:
-    if not value:
-        return False
-    try:
-        datetime.strptime(value[:10], '%Y-%m-%d')
-        return bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', value[:10]))
-    except ValueError:
-        return False
-
-
-def is_official_link(url: str) -> bool:
-    if not url:
-        return False
-    try:
-        parsed = urlparse(url.strip())
-        host = (parsed.hostname or '').lower()
-        return parsed.scheme.lower() == 'https' and (host == 'cvm.gov.br' or host.endswith('.cvm.gov.br'))
-    except ValueError:
-        return False
-
-
-def save_csv(name: str, fields: tuple[str, ...], records: list[dict]) -> None:
-    with (OUTPUT / name).open('w', newline='', encoding='utf-8-sig') as file:
+def write_csv(filename: str, fields: list[str], records: list[dict]) -> None:
+    with (OUT / filename).open('w', newline='', encoding='utf-8-sig') as file:
         writer = csv.DictWriter(file, fieldnames=fields, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(records)
 
 
-def issue(items: list[dict], dataset: str, year: int, source: str,
-          row: int, code: str, details: str = '') -> None:
-    items.append(dict(dataset=dataset, year=year, source_file=source,
-                      row_number=row, issue=code, details=details[:400]))
+def parse_date(value: str) -> date | None:
+    try:
+        if not re.fullmatch(r'\d{4}-\d{2}-\d{2}', value or ''):
+            return None
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def key(record: dict) -> tuple[str, str, str, str]:
+    return tuple(record.get(x, '').strip() for x in ('dataset', 'cnpj_cia', 'dt_refer', 'versao'))
+
+
+def inspect_link(value: str) -> dict:
+    result = {'scheme': '', 'host': '', 'host_cvm': False, 'https': False,
+              'numero_sequencial': '', 'codigo_instituicao': '', 'identifier_status': ''}
+    try:
+        url = urlsplit(value.strip())
+        host = (url.hostname or '').lower()
+        query = parse_qs(url.query, keep_blank_values=True)
+        numbers = query.get('NumeroSequencialDocumento', [])
+        institutions = query.get('CodigoInstituicao', [])
+        seq = numbers[0] if len(numbers) == 1 else ''
+        institution = institutions[0] if len(institutions) == 1 else ''
+        valid_seq = bool(re.fullmatch(r'[0-9]+', seq))
+        result.update(scheme=url.scheme.lower(), host=host,
+                      host_cvm=host in OFFICIAL_HOSTS, https=url.scheme.lower() == 'https',
+                      numero_sequencial=seq, codigo_instituicao=institution,
+                      identifier_status='FORMATO_PRESENTE_NAO_AUTENTICADO' if valid_seq else 'AUSENTE_OU_INVALIDO')
+    except ValueError:
+        result['identifier_status'] = 'URL_MALFORMADA'
+    return result
 
 
 def main() -> None:
-    OUTPUT.mkdir(parents=True, exist_ok=True)
-    inventory: list[dict] = []
-    documents: list[dict] = []
-    anomalies: list[dict] = []
-    matches: list[dict] = []
-    zips: list[dict] = []
-    stats = Counter()
+    OUT.mkdir(parents=True, exist_ok=True)
+    documents = read_csv('documentos.csv')
+    matches = read_csv('correspondencias.csv')
+    if not documents or not matches:
+        raise RuntimeError('Fase 2 sem documentos/correspondencias: auditoria fase 3 nao pode prosseguir.')
+    match_index = defaultdict(list)
+    for match in matches:
+        match_index[key(match)].append(match)
+    versions = defaultdict(list)
+    link_records = []
+    gaps = []
+    scenarios = []
+    issues = []
+    identifiers = defaultdict(set)
 
-    for dataset in DATASETS:
-        for year in YEARS:
-            path = DATA / f'{dataset.lower()}_cia_aberta_{year}.zip'
-            z = dict(dataset=dataset, year=year, path=str(path.relative_to(ROOT)),
-                     exists=path.is_file(), sha256=None, files=0, error=None)
-            if not path.is_file():
-                issue(anomalies, dataset, year, z['path'], 0, 'ZIP_AUSENTE')
-                zips.append(z)
-                continue
-            try:
-                if not zipfile.is_zipfile(path):
-                    raise ValueError('ZIP inválido')
-                z['sha256'] = digest(path)
-                with zipfile.ZipFile(path) as archive:
-                    corrupt = archive.testzip()
-                    if corrupt:
-                        raise ValueError(f'Membro corrompido: {corrupt}')
-                    members = sorted(n for n in archive.namelist() if n.lower().endswith('.csv'))
-                    main_name = f'{dataset.lower()}_cia_aberta_{year}.csv'
-                    principal = [m for m in members if Path(m).name.lower() == main_name]
-                    if len(principal) != 1:
-                        issue(anomalies, dataset, year, z['path'], 0,
-                              'ARQUIVO_PRINCIPAL_AUSENTE_OU_AMBIGUO', str(principal))
-                    main_keys = Counter()
-                    main_meta: dict[tuple[str, str, str], dict] = {}
-                    accounting_keys = Counter()
-                    accounting_sources = defaultdict(set)
-                    for member in members:
-                        with open_csv(archive, member) as stream:
-                            reader = csv.DictReader(stream, delimiter=';')
-                            cols = [c.strip().upper() for c in (reader.fieldnames or [])]
-                            candidates = [c for c in cols if any(t in c for t in TOKENS)]
-                            inventory.append(dict(dataset=dataset, year=year,
-                                                  source_file=member, column_count=len(cols),
-                                                  candidate_columns='|'.join(candidates),
-                                                  has_reference=any('REFER' in c for c in cols),
-                                                  has_version='VERSAO' in cols,
-                                                  has_delivery_candidate=any(any(t in c for t in
-                                                      ('RECEB', 'ENTREG', 'PUBLIC', 'PROTOC')) for c in cols),
-                                                  zip_sha256=z['sha256']))
-                            z['files'] += 1
-                            is_main = member in principal
-                            required = MAIN_FIELDS if is_main else ('CNPJ_CIA', 'DT_REFER', 'VERSAO')
-                            if any(c not in cols for c in required):
-                                if is_main:
-                                    issue(anomalies, dataset, year, member, 0,
-                                          'COLUNAS_PRINCIPAIS_AUSENTES',
-                                          ','.join(c for c in required if c not in cols))
-                                continue
-                            # Arquivos não principais: apenas índices de identidade e versão;
-                            # não guardar linhas contábeis nem interpretar valores financeiros.
-                            for line_number, original in enumerate(reader, start=2):
-                                r = {str(k).strip().upper(): (v or '').strip()
-                                     for k, v in original.items() if k is not None}
-                                key = (r.get('CNPJ_CIA', ''), r.get('DT_REFER', ''),
-                                       r.get('VERSAO', ''))
-                                if is_main:
-                                    ticker = ticker_candidate(r.get('DENOM_CIA', ''))
-                                    if not ticker:
-                                        continue
-                                    stats['main_target_rows'] += 1
-                                    main_keys[key] += 1
-                                    link = r.get('LINK_DOC', '')
-                                    receipt = r.get('DT_RECEB', '')
-                                    flags = []
-                                    if not all(key):
-                                        flags.append('CHAVE_INCOMPLETA')
-                                    if not valid_date(receipt):
-                                        flags.append('DT_RECEB_AUSENTE_OU_INVALIDA')
-                                    if valid_date(receipt) and valid_date(key[1]) and receipt[:10] < key[1][:10]:
-                                        flags.append('RECEBIMENTO_ANTES_DA_REFERENCIA')
-                                    if not link:
-                                        flags.append('LINK_DOC_AUSENTE')
-                                    elif not is_official_link(link):
-                                        flags.append('LINK_DOMINIO_NAO_OFICIAL_OU_NAO_HTTPS')
-                                    for flag in flags:
-                                        issue(anomalies, dataset, year, member, line_number,
-                                              flag, f'{ticker}: {key}')
-                                    record = dict(dataset=dataset, year=year,
-                                                  source_file=member, ticker_candidate=ticker,
-                                                  denom_cia=r.get('DENOM_CIA', ''),
-                                                  cnpj_cia=key[0], dt_refer=key[1], versao=key[2],
-                                                  dt_receb=receipt, link_doc=link,
-                                                  link_official_domain=is_official_link(link),
-                                                  document_key='|'.join(key), row_number=line_number,
-                                                  status='PENDENTE_PIT_' + ('COM_ANOMALIA' if flags else 'METADADOS_PRESENTES'))
-                                    documents.append(record)
-                                    main_meta.setdefault(key, record)
-                                else:
-                                    if all(key):
-                                        accounting_keys[key] += 1
-                                        accounting_sources[key].add(member)
-                    for key, count in main_keys.items():
-                        doc = main_meta[key]
-                        linked = accounting_keys[key]
-                        status = 'CHAVE_ENCONTRADA' if linked else 'SEM_LINHAS_CONTABEIS_CORRESPONDENTES'
-                        if count > 1:
-                            status = 'CHAVE_DUPLICADA_NO_PRINCIPAL'
-                            issue(anomalies, dataset, year, main_name, 0,
-                                  'CHAVE_DUPLICADA_NO_PRINCIPAL', f'{key}: {count} linhas')
-                        if not linked:
-                            issue(anomalies, dataset, year, main_name, 0,
-                                  'SEM_LINHAS_CONTABEIS_CORRESPONDENTES', str(key))
-                        matches.append(dict(dataset=dataset, year=year,
-                                            ticker_candidate=doc['ticker_candidate'],
-                                            cnpj_cia=key[0], dt_refer=key[1], versao=key[2],
-                                            source_file=main_name, main_rows=count,
-                                            accounting_rows=linked,
-                                            accounting_files=len(accounting_sources[key]),
-                                            status=status))
-            except Exception as exc:
-                z['error'] = f'{type(exc).__name__}: {exc}'
-                issue(anomalies, dataset, year, z['path'], 0, 'FALHA_LEITURA_ZIP', z['error'])
-            zips.append(z)
+    for doc in documents:
+        k = key(doc)
+        receipt = parse_date(doc.get('dt_receb', ''))
+        reference = parse_date(doc.get('dt_refer', ''))
+        info = inspect_link(doc.get('link_doc', ''))
+        associated = match_index.get(k, [])
+        count = sum(int(m.get('accounting_rows', 0) or 0) for m in associated)
+        label = doc.get('ticker_candidate', '')
+        base = {'dataset': k[0], 'ticker': label, 'cnpj_cia': k[1],
+                'dt_refer': k[2], 'versao': k[3], 'dt_receb': doc.get('dt_receb', '')}
+        versions[(k[0], k[1], k[2])].append((k[3], receipt, count, info['numero_sequencial']))
+        link_records.append({**base, **info, 'accounting_rows': count,
+                             'document_link': doc.get('link_doc', ''),
+                             'publication_authenticated': False})
+        if info['numero_sequencial']:
+            identifiers[info['numero_sequencial']].add(k)
+        if count == 0 or len(associated) != 1:
+            gaps.append({**base, 'accounting_rows': count,
+                         'match_records': len(associated),
+                         'issue': 'SEM_LINHAS_CONTABEIS' if count == 0 else 'CHAVE_AMBIGUA'})
+        if k[0] not in EXPECTED or not receipt or not reference or receipt < reference:
+            issues.append({**base, 'issue': 'METADADOS_INCONSISTENTES'})
+        if not info['host_cvm']:
+            issues.append({**base, 'issue': 'DOMINIO_FORA_DA_LISTA_CVM'})
+        if not info['https']:
+            issues.append({**base, 'issue': 'LINK_HTTP_SEM_AUTENTICACAO_TRANSPORTE'})
+        if info['identifier_status'] != 'FORMATO_PRESENTE_NAO_AUTENTICADO':
+            issues.append({**base, 'issue': 'IDENTIFICADOR_AUSENTE_OU_INVALIDO'})
+        # Simulacoes mecanicas: NAO provam data de divulgacao publica.
+        if receipt:
+            for cutoff in (receipt - timedelta(days=1), receipt, receipt + timedelta(days=1)):
+                scenarios.append({**base, 'cutoff': cutoff.isoformat(),
+                                  'receipt_based_eligible_candidate': cutoff >= receipt,
+                                  'public_availability_verified': False,
+                                  'pit_approved': False})
 
-    save_csv('inventario.csv', ('dataset', 'year', 'source_file', 'column_count',
-             'candidate_columns', 'has_reference', 'has_version',
-             'has_delivery_candidate', 'zip_sha256'), inventory)
-    save_csv('documentos.csv', DOCUMENT_FIELDS, documents)
-    save_csv('correspondencias.csv', MATCH_FIELDS, matches)
-    save_csv('anomalias.csv', ANOMALY_FIELDS, anomalies)
+    version_rows = []
+    for (dataset, cnpj, reference), items in sorted(versions.items()):
+        numeric = sorted({int(v) for v, _, _, _ in items if v.isdigit()})
+        observed = {int(v) for v, _, _, _ in items if v.isdigit()}
+        missing = [v for v in range(1, max(numeric) + 1) if v not in observed] if numeric else []
+        chronology = sorted((int(v), d) for v, d, _, _ in items if v.isdigit() and d)
+        nonmonotonic = any(b_date < a_date for (_, a_date), (_, b_date) in zip(chronology, chronology[1:]))
+        versions_without_accounting = sorted(v for v, _, count, _ in items if count == 0)
+        version_rows.append({'dataset': dataset, 'cnpj_cia': cnpj, 'dt_refer': reference,
+                             'versions_in_main': '|'.join(str(v) for v in numeric),
+                             'missing_version_numbers': '|'.join(map(str, missing)),
+                             'versions_without_accounting': '|'.join(versions_without_accounting),
+                             'receipt_nonmonotonic_by_version': nonmonotonic,
+                             'status': 'INVESTIGAR' if missing or nonmonotonic or versions_without_accounting else 'CONSISTENCIA_ESTRUTURAL_SEM_AUTENTICACAO'})
+        if nonmonotonic:
+            issues.append({'dataset': dataset, 'cnpj_cia': cnpj, 'dt_refer': reference,
+                           'issue': 'RECEBIMENTO_NAO_MONOTONICO_POR_VERSAO'})
+
+    collisions = [{'numero_sequencial': seq, 'keys': '|'.join('/'.join(k) for k in sorted(keys)),
+                   'key_count': len(keys)} for seq, keys in identifiers.items() if len(keys) > 1]
+    for item in collisions:
+        issues.append({'issue': 'IDENTIFICADOR_COMPARTILHADO_ENTRE_CHAVES', **item})
+
+    write_csv('fase3_links_identificadores.csv', ['dataset', 'ticker', 'cnpj_cia', 'dt_refer',
+              'versao', 'dt_receb', 'scheme', 'host', 'host_cvm', 'https', 'numero_sequencial',
+              'codigo_instituicao', 'identifier_status', 'accounting_rows', 'document_link',
+              'publication_authenticated'], link_records)
+    write_csv('fase3_divergencias.csv', ['dataset', 'ticker', 'cnpj_cia', 'dt_refer', 'versao',
+              'dt_receb', 'accounting_rows', 'match_records', 'issue'], gaps)
+    write_csv('fase3_versoes.csv', ['dataset', 'cnpj_cia', 'dt_refer', 'versions_in_main',
+              'missing_version_numbers', 'versions_without_accounting',
+              'receipt_nonmonotonic_by_version', 'status'], version_rows)
+    write_csv('fase3_cortes_historicos.csv', ['dataset', 'ticker', 'cnpj_cia', 'dt_refer',
+              'versao', 'dt_receb', 'cutoff', 'receipt_based_eligible_candidate',
+              'public_availability_verified', 'pit_approved'], scenarios)
+    write_csv('fase3_alertas.csv', ['dataset', 'ticker', 'cnpj_cia', 'dt_refer', 'versao',
+              'dt_receb', 'issue', 'numero_sequencial', 'keys', 'key_count'], issues)
     summary = {
-        'tool': 'B3 STOCK SELECTOR - auditoria documental exploratoria CVM',
+        'tool': 'B3 STOCK SELECTOR - auditoria fase 3 de evidencias PIT',
         'generated_at_utc': datetime.now(timezone.utc).isoformat(),
-        'scope': 'DFP/ITR 2021-2025; cinco empresas candidatas; ZIPs locais; sem rede',
-        'target_tickers': list(COMPANIES),
-        'zips': zips,
-        'csv_files_inspected': len(inventory),
-        'files_with_delivery_candidate': sum(bool(r['has_delivery_candidate']) for r in inventory),
-        'candidate_column_frequency': dict(Counter(c for r in inventory
-            for c in r['candidate_columns'].split('|') if c)),
-        'target_document_rows': len(documents),
-        'document_rows_by_ticker': dict(Counter(d['ticker_candidate'] for d in documents)),
-        'document_rows_with_official_domain_link': sum(d['link_official_domain'] for d in documents),
-        'document_rows_with_valid_receipt_date': sum(valid_date(d['dt_receb']) for d in documents),
-        'identity_version_matches': len(matches),
-        'identity_version_matches_with_accounting_rows': sum(m['accounting_rows'] > 0 for m in matches),
-        'anomalies': len(anomalies),
-        'anomalies_by_type': dict(Counter(a['issue'] for a in anomalies)),
-        'source_authenticated': False,
+        'documents': len(documents), 'missing_accounting_matches': len(gaps),
+        'version_groups': len(version_rows),
+        'version_groups_requiring_investigation': sum(x['status'] == 'INVESTIGAR' for x in version_rows),
+        'links_on_known_cvm_host': sum(x['host_cvm'] for x in link_records),
+        'links_https': sum(x['https'] for x in link_records),
+        'sequential_identifiers_present': sum(bool(x['numero_sequencial']) for x in link_records),
+        'sequential_identifier_collisions': len(collisions),
+        'simulated_cutoffs': len(scenarios), 'alerts_by_type': dict(Counter(x['issue'] for x in issues)),
+        'source_authenticated': False, 'public_availability_verified': False,
         'pit_approved': False,
         'limitations': [
-            'DT_RECEB é metadado de recebimento; não foi demonstrada equivalência com divulgação pública.',
-            'LINK_DOC e domínio oficial não comprovam acessibilidade histórica, protocolo ou versão do conteúdo.',
-            'Correspondência textual entre denominação e ticker não autentica identidade societária.',
-            'Chave CNPJ_CIA/DT_REFER/VERSAO comum a CSVs não prova que o conteúdo era conhecido naquela data.',
-            'Nenhum arquivo publication_registry.csv é criado; fail-safe de produção permanece ativo.',
+            'Os links e NumeroSequencialDocumento sao apenas metadados extraidos dos CSVs; nao houve consulta ao ENET.',
+            'HTTP em dominio da CVM nao comprova HTTPS, identidade documental nem acesso historico.',
+            'DT_RECEB nao foi homologado como instante de disponibilidade publica.',
+            'Cortes historicos testam somente uma regra hipotetica baseada em DT_RECEB; nao autorizam backtest.',
+            'A ausencia de uma versao nos CSVs atuais nao prova ausencia na divulgacao historica.',
+            'Nao existe verificacao de conteudo documental por hash/assinatura/protocolo externo.',
+            'Nao gera publication_registry.csv nem modifica o robo; FAIL-SAFE permanece ativo.'
         ],
-        'next_source': 'https://www.rad.cvm.gov.br/ENETWeb/frmConsultaExternaCVM.aspx',
     }
-    (OUTPUT / 'resumo.json').write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
-    print(f'ZIPs encontrados: {sum(z["exists"] for z in zips)}/{len(zips)}')
-    print(f'CSVs inspecionados: {len(inventory)}')
-    print(f'Documentos candidatos das cinco empresas: {len(documents)}')
-    print(f'Correspondências de chave com linhas contábeis: '
-          f'{summary["identity_version_matches_with_accounting_rows"]}/{len(matches)}')
-    print(f'Anomalias: {len(anomalies)}')
-    print(f'Relatórios: {OUTPUT}')
-    print('PIT: PENDENTE — nenhum registro autenticado ou aprovado automaticamente')
+    (OUT / 'fase3_resumo.json').write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
+    print(json.dumps({k: summary[k] for k in ('documents', 'missing_accounting_matches',
+          'version_groups_requiring_investigation', 'simulated_cutoffs', 'pit_approved')},
+          ensure_ascii=False, indent=2))
+    print('PIT PENDENTE: auditoria estrutural, sem autenticacao documental externa.')
 
 
 if __name__ == '__main__':
