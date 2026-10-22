@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   auditoria-cvm-pit:
-    name: Auditar ZIPs CVM sem executar o robo
+    name: Baixar e auditar ZIPs CVM sem executar o robo
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 45
 
     steps:
       - name: Obter codigo do repositorio
@@ -27,6 +27,85 @@ jobs:
             echo 'ERRO: auditoria_cvm_pit.py nao encontrado na raiz do repositorio.'
             exit 1
           }
+
+      - name: Baixar ZIPs oficiais CVM e verificar integridade
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          import os
+          import time
+          import urllib.error
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          target = Path('data/cvm/raw')
+          target.mkdir(parents=True, exist_ok=True)
+          records = []
+          failures = []
+
+          for dataset in ('DFP', 'ITR'):
+              for year in range(2021, 2026):
+                  filename = f'{dataset.lower()}_cia_aberta_{year}.zip'
+                  url = f'https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{dataset}/DADOS/{filename}'
+                  destination = target / filename
+                  tmp = target / (filename + '.part')
+                  error = None
+                  for attempt in range(1, 4):
+                      try:
+                          if tmp.exists():
+                              tmp.unlink()
+                          request = urllib.request.Request(url, headers={
+                              'User-Agent': 'B3-Stock-Selector-PIT-Audit/1.0 (public-data-research)',
+                              'Accept': 'application/zip, application/octet-stream, */*',
+                          })
+                          sha = hashlib.sha256()
+                          size = 0
+                          with urllib.request.urlopen(request, timeout=120) as response, tmp.open('wb') as output:
+                              while True:
+                                  chunk = response.read(1024 * 1024)
+                                  if not chunk:
+                                      break
+                                  output.write(chunk)
+                                  sha.update(chunk)
+                                  size += len(chunk)
+                          if not zipfile.is_zipfile(tmp):
+                              raise ValueError('Resposta nao e ZIP valido')
+                          with zipfile.ZipFile(tmp) as archive:
+                              corrupt = archive.testzip()
+                              if corrupt:
+                                  raise ValueError(f'Membro corrompido: {corrupt}')
+                          os.replace(tmp, destination)
+                          records.append({'dataset': dataset, 'year': year, 'url': url,
+                                          'file': str(destination), 'bytes': size,
+                                          'sha256': sha.hexdigest(), 'status': 'downloaded'})
+                          print(f'OK {filename}: {size} bytes, SHA256={sha.hexdigest()}', flush=True)
+                          error = None
+                          break
+                      except Exception as exc:
+                          error = f'{type(exc).__name__}: {exc}'
+                          print(f'TENTATIVA {attempt}/3 {filename}: {error}', flush=True)
+                          if attempt < 3:
+                              time.sleep(5 * attempt)
+                  if error is not None:
+                      failures.append({'dataset': dataset, 'year': year, 'url': url, 'error': error})
+                      records.append({'dataset': dataset, 'year': year, 'url': url,
+                                      'file': str(destination), 'status': 'failed', 'error': error})
+                      if tmp.exists():
+                          tmp.unlink()
+
+          output_dir = Path('outputs/cvm_pit_audit')
+          output_dir.mkdir(parents=True, exist_ok=True)
+          (output_dir / 'downloads.json').write_text(
+              json.dumps({'records': records, 'failed': failures}, indent=2, ensure_ascii=False),
+              encoding='utf-8'
+          )
+          print(f'Downloads validos: {len(records) - len(failures)}/10', flush=True)
+          if failures:
+              print('AVISO: ha downloads ausentes; auditoria sera parcial.', flush=True)
+          PY
 
       - name: Executar auditoria independente
         run: python auditoria_cvm_pit.py
@@ -48,5 +127,6 @@ jobs:
           path: |
             outputs/cvm_pit_audit/resumo.json
             outputs/cvm_pit_audit/inventario.csv
+            outputs/cvm_pit_audit/downloads.json
           if-no-files-found: warn
           retention-days: 30
