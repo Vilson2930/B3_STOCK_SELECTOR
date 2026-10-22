@@ -70,7 +70,7 @@ RESEARCH_FACTORS = {
         "direction": "LOW",
         "role": "PRIMARY",
         "status": "CANDIDATE",
-        "weight": 1.00,
+        "weight": 0.00,
     },
     "MARGEM_LIQUIDA": {
         "direction": "LOW",
@@ -88,7 +88,7 @@ RESEARCH_FACTORS = {
 
 
 RESEARCH_WEIGHTS = {
-    "MARGEM_BRUTA": 1.00,
+    "MARGEM_BRUTA": 0.00,
     "MARGEM_LIQUIDA": 0.00,
     "ROE": 0.00,
 }
@@ -208,52 +208,17 @@ def assert_no_future_return(
 # BASE
 # =============================================================================
 
-def prepare_turnaround_base(
-    fundamentals: pd.DataFrame,
-) -> pd.DataFrame:
-
-    required = {
-        "ISSUER_ID",
-        "FUNDAMENTAL_ENGINE_OK",
-        "MARGEM_BRUTA",
-        "MARGEM_LIQUIDA",
-        "ROE",
-    }
-
-    _require_columns(
-        fundamentals,
-        required,
-        "fundamentals",
-    )
-
+def prepare_turnaround_base(fundamentals: pd.DataFrame) -> pd.DataFrame:
+    """Mantém emissores pendentes para auditoria; não os aprova."""
+    _require_dataframe(fundamentals, "fundamentals")
+    _require_columns(fundamentals, {"ISSUER_ID"}, "fundamentals")
     assert_no_future_return(fundamentals)
-
     result = fundamentals.copy()
-
-    if "INVESTABLE" in result.columns:
-
-        result = result.loc[
-            result["INVESTABLE"]
-            .fillna(False)
-            .astype(bool)
-        ].copy()
-
-    result = result.loc[
-        result["FUNDAMENTAL_ENGINE_OK"]
-        .fillna(False)
-        .astype(bool)
-    ].copy()
-
-    if result.empty:
-        raise TurnaroundIntegrityError(
-            "FAIL-SAFE: nenhuma empresa elegível para Turnaround."
-        )
-
-    if result["ISSUER_ID"].duplicated().any():
-        raise TurnaroundIntegrityError(
-            "FAIL-SAFE: ISSUER_ID duplicado."
-        )
-
+    if result["ISSUER_ID"].isna().any() or result["ISSUER_ID"].duplicated().any():
+        raise TurnaroundIntegrityError("ISSUER_ID ausente ou duplicado.")
+    for col in ("MARGEM_BRUTA", "MARGEM_LIQUIDA", "ROE"):
+        if col not in result:
+            result[col] = np.nan
     return result
 
 
@@ -455,111 +420,13 @@ def calculate_safety_context(
 # SCORE OPERACIONAL — 100% MARGEM BRUTA LOW
 # =============================================================================
 
-def calculate_experimental_score(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-
+def calculate_experimental_score(df: pd.DataFrame) -> pd.DataFrame:
+    """API preservada, mas pontuação de margem bruta baixa desativada."""
     result = df.copy()
-
-    signal_columns = {
-        "MARGEM_BRUTA":
-            "MARGEM_BRUTA_DEPRESSED_SIGNAL",
-
-        "MARGEM_LIQUIDA":
-            "MARGEM_LIQUIDA_DEPRESSED_SIGNAL",
-
-        "ROE":
-            "ROE_DEPRESSED_SIGNAL",
-    }
-
-    weighted_sum = pd.Series(
-        0.0,
-        index=result.index,
-        dtype=float,
-    )
-
-    available_weight = pd.Series(
-        0.0,
-        index=result.index,
-        dtype=float,
-    )
-
-    for factor, weight in RESEARCH_WEIGHTS.items():
-
-        column = signal_columns[factor]
-
-        signal = pd.to_numeric(
-            result[column],
-            errors="coerce",
-        )
-
-        valid = signal.notna()
-
-        weighted_sum.loc[valid] += (
-            signal.loc[valid]
-            * weight
-        )
-
-        available_weight.loc[valid] += weight
-
-    # -------------------------------------------------------------------------
-    # NÃO IMPUTAMOS FATOR AUSENTE.
-    #
-    # O peso é renormalizado somente entre fatores disponíveis.
-    # O score é válido quando a cobertura dos fatores com peso positivo chega a 100%.
-    # Margem Líquida e ROE têm peso zero e permanecem apenas para auditoria.
-    # -------------------------------------------------------------------------
-
-    score = pd.Series(
-        np.nan,
-        index=result.index,
-        dtype=float,
-    )
-
-    has_any = available_weight.gt(0)
-
-    score.loc[has_any] = (
-        weighted_sum.loc[has_any]
-        /
-        available_weight.loc[has_any]
-    )
-
-    result[
-        "TURNAROUND_RESEARCH_WEIGHT_COVERAGE"
-    ] = available_weight
-
-    result[
-        "TURNAROUND_RESEARCH_SCORE"
-    ] = score.clip(
-        lower=0.0,
-        upper=1.0,
-    )
-
-    result[
-        "TURNAROUND_RESEARCH_SCORE_VALID"
-    ] = (
-        result[
-            "TURNAROUND_RESEARCH_SCORE"
-        ]
-        .notna()
-        &
-        available_weight.ge(0.999999)
-    )
-
-    # Score incompleto permanece visível para auditoria,
-    # mas não é elegível como score completo.
-    result[
-        "TURNAROUND_RESEARCH_SCORE_COMPLETE"
-    ] = np.where(
-        result[
-            "TURNAROUND_RESEARCH_SCORE_VALID"
-        ],
-        result[
-            "TURNAROUND_RESEARCH_SCORE"
-        ],
-        np.nan,
-    )
-
+    result["TURNAROUND_RESEARCH_WEIGHT_COVERAGE"] = 0.0
+    result["TURNAROUND_RESEARCH_SCORE"] = np.nan
+    result["TURNAROUND_RESEARCH_SCORE_VALID"] = False
+    result["TURNAROUND_RESEARCH_SCORE_COMPLETE"] = np.nan
     return result
 
 
@@ -567,41 +434,9 @@ def calculate_experimental_score(
 # CLASSIFICAÇÃO EXPERIMENTAL
 # =============================================================================
 
-def classify_research_candidate(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-
+def classify_research_candidate(df: pd.DataFrame) -> pd.DataFrame:
     result = df.copy()
-
-    score = pd.to_numeric(
-        result[
-            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
-        ],
-        errors="coerce",
-    )
-
-    status = pd.Series(
-        "NO_SIGNAL",
-        index=result.index,
-        dtype="object",
-    )
-
-    status.loc[
-        score.ge(0.50)
-    ] = "RESEARCH_CANDIDATE"
-
-    status.loc[
-        score.ge(0.80)
-    ] = "HIGH_RESEARCH_INTEREST"
-
-    status.loc[
-        score.isna()
-    ] = "INSUFFICIENT_DATA"
-
-    result[
-        "TURNAROUND_RESEARCH_STATUS"
-    ] = status
-
+    result["TURNAROUND_RESEARCH_STATUS"] = "PENDENTE"
     return result
 
 
@@ -610,25 +445,10 @@ def classify_research_candidate(
 # =============================================================================
 
 def enforce_production_lock() -> None:
-
-    production_authorized = bool(
-        TURNAROUND_ENGINE.get(
-            "production_authorized",
-            False,
-        )
-    )
-
-    validated_rule = TURNAROUND_ENGINE.get(
-        "validated_rule"
-    )
-
-    if (
-        production_authorized
-        and validated_rule is None
-    ):
+    """Não aceita habilitação por configuração do modelo MB_100."""
+    if TURNAROUND_ENGINE.get("production_authorized", False):
         raise TurnaroundProductionError(
-            "FAIL-SAFE: Turnaround marcado como produção "
-            "sem regra temporalmente validada."
+            "Produção bloqueada: critérios das 34 etapas não comprovados."
         )
 
 
@@ -640,166 +460,30 @@ def run_turnaround_engine(
     fundamentals: pd.DataFrame,
     context: PITContext,
 ) -> pd.DataFrame:
-
-    if not TURNAROUND_ENGINE.get(
-        "enabled",
-        True,
-    ):
-        raise TurnaroundError(
-            "Turnaround Engine está desativado."
-        )
-
+    """Pipeline descritivo: sem ranking, aprovação ou sinal de compra."""
     enforce_production_lock()
-
-    base = prepare_turnaround_base(
-        fundamentals
+    base = prepare_turnaround_base(fundamentals)
+    result = calculate_research_positions(base)
+    result = calculate_depressed_signals(result)
+    result = classify_gross_margin_zone(result)
+    result = calculate_safety_context(result)
+    result = calculate_experimental_score(result)
+    result = classify_research_candidate(result)
+    result["TURNAROUND_PRODUCTION_AUTHORIZED"] = False
+    result["TURNAROUND_OPERATIONAL_SIGNAL"] = "BLOCKED_STUDY34_PENDING"
+    result["TURNAROUND_ENGINE_VERSION"] = "0.4.0-study34-pending"
+    result["TURNAROUND_ENGINE_STATUS"] = "PENDENTE"
+    result["TURNAROUND_SCORE_MODEL"] = "DISABLED_LEGACY_MB100"
+    result["FORMATION_DATE_TURNAROUND"] = context.formation_date
+    result["ACCOUNTING_CUTOFF_TURNAROUND"] = context.accounting_cutoff
+    result["FUTURE_RETURN_USED_TURNAROUND"] = False
+    result["TURNAROUND_RESEARCH_RANK"] = np.nan
+    result["STUDY_34_STATUS"] = "PENDENTE"
+    result["STUDY_34_EVIDENCE_VERIFIED"] = False
+    result["STUDY_34_REASON"] = (
+        "Aprovação depende de comprovação integral das 34 etapas."
     )
-
-    result = calculate_research_positions(
-        base
-    )
-
-    result = calculate_depressed_signals(
-        result
-    )
-
-    result = classify_gross_margin_zone(
-        result
-    )
-
-    result = calculate_safety_context(
-        result
-    )
-
-    result = calculate_experimental_score(
-        result
-    )
-
-    result = classify_research_candidate(
-        result
-    )
-
-    production_authorized = bool(
-        TURNAROUND_ENGINE.get(
-            "production_authorized",
-            False,
-        )
-    )
-
-    result[
-        "TURNAROUND_PRODUCTION_AUTHORIZED"
-    ] = production_authorized
-
-    if not production_authorized:
-
-        result[
-            "TURNAROUND_OPERATIONAL_SIGNAL"
-        ] = "BLOCKED_RESEARCH_ONLY"
-
-    else:
-
-        validated_rule = TURNAROUND_ENGINE.get(
-            "validated_rule"
-        )
-
-        if validated_rule is None:
-            raise TurnaroundProductionError(
-                "FAIL-SAFE: regra validada ausente."
-            )
-
-        if validated_rule != "MB_100":
-            raise TurnaroundProductionError(
-                "FAIL-SAFE: regra operacional divergente do modelo "
-                "MB_100."
-            )
-
-        configured_weights = TURNAROUND_ENGINE.get(
-            "study_weights",
-            RESEARCH_WEIGHTS,
-        )
-
-        if configured_weights != RESEARCH_WEIGHTS:
-            raise TurnaroundProductionError(
-                "FAIL-SAFE: pesos configurados divergem do modelo "
-                "MB 100% implementado."
-            )
-
-        result[
-            "TURNAROUND_OPERATIONAL_SIGNAL"
-        ] = np.where(
-            result[
-                "TURNAROUND_RESEARCH_SCORE_VALID"
-            ]
-            .fillna(False)
-            .astype(bool),
-            "STUDY_SCORE_AUTHORIZED",
-            "INSUFFICIENT_DATA",
-        )
-
-    result[
-        "TURNAROUND_ENGINE_VERSION"
-    ] = "0.3.0"
-
-    result[
-        "TURNAROUND_ENGINE_STATUS"
-    ] = TURNAROUND_ENGINE.get(
-        "status",
-        "RESEARCH_CANDIDATE",
-    )
-
-    result[
-        "TURNAROUND_SCORE_MODEL"
-    ] = (
-        "MB_100_STUDY"
-    )
-
-    result[
-        "FORMATION_DATE_TURNAROUND"
-    ] = context.formation_date
-
-    result[
-        "ACCOUNTING_CUTOFF_TURNAROUND"
-    ] = context.accounting_cutoff
-
-    result[
-        "FUTURE_RETURN_USED_TURNAROUND"
-    ] = False
-
-    result[
-        "TURNAROUND_RESEARCH_RANK"
-    ] = (
-        result[
-            "TURNAROUND_RESEARCH_SCORE_COMPLETE"
-        ]
-        .rank(
-            ascending=False,
-            method="min",
-            na_option="bottom",
-        )
-    )
-
-    result = (
-        result
-        .sort_values(
-            [
-                "TURNAROUND_RESEARCH_SCORE_COMPLETE",
-                "ISSUER_ID",
-            ],
-            ascending=[
-                False,
-                True,
-            ],
-            kind="mergesort",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    assert_no_future_return(
-        result
-    )
-
+    assert_no_future_return(result)
     return result
 
 
@@ -807,90 +491,28 @@ def run_turnaround_engine(
 # AUDITORIA
 # =============================================================================
 
-def audit_turnaround(
-    result: pd.DataFrame,
-) -> dict:
-
-    _require_dataframe(
-        result,
-        "turnaround_result",
-    )
-
-    status_counts = (
-        result[
-            "TURNAROUND_RESEARCH_STATUS"
-        ]
-        .value_counts(
-            dropna=False
-        )
-        .to_dict()
-    )
-
-    zone_counts = (
-        result[
-            "GROSS_MARGIN_ZONE"
-        ]
-        .value_counts(
-            dropna=False
-        )
-        .to_dict()
-    )
-
-    valid = (
-        result[
-            "TURNAROUND_RESEARCH_SCORE_VALID"
-        ]
-        .fillna(False)
-        .astype(bool)
-    )
-
+def audit_turnaround(result: pd.DataFrame) -> dict:
+    _require_dataframe(result, "turnaround_result")
     return {
-        "status": "OK",
-        "mode": (
-            "STUDY_OPERATIONAL"
-            if bool(
-                TURNAROUND_ENGINE.get(
-                    "production_authorized",
-                    False,
-                )
-            )
-            else "RESEARCH_ONLY"
-        ),
-        "score_model":
-            "MB_100_STUDY",
-        "issuers":
-            int(len(result)),
-        "valid_complete_scores":
-            int(valid.sum()),
-        "weights": RESEARCH_WEIGHTS,
-        "primary_factor":
-            "MARGEM_BRUTA",
-        "primary_direction":
-            "LOW",
-        "research_status_distribution":
-            status_counts,
-        "gross_margin_zone_distribution":
-            zone_counts,
-        "production_authorized":
-            bool(
-                TURNAROUND_ENGINE.get(
-                    "production_authorized",
-                    False,
-                )
-            ),
-        "weights_optimized_on_future_return":
-            False,
-        "future_return_used":
-            False,
-        "buy_signal_generated":
-            False,
-        "operational_score_available":
-            bool(
-                TURNAROUND_ENGINE.get(
-                    "production_authorized",
-                    False,
-                )
-            ),
+        "status": "PENDENTE",
+        "mode": "AUDIT_ONLY",
+        "score_model": "DISABLED_LEGACY_MB100",
+        "issuers": int(len(result)),
+        "valid_complete_scores": 0,
+        "weights": {},
+        "primary_factor": None,
+        "primary_direction": None,
+        "research_status_distribution": result[
+            "TURNAROUND_RESEARCH_STATUS"
+        ].value_counts(dropna=False).to_dict(),
+        "gross_margin_zone_distribution": result[
+            "GROSS_MARGIN_ZONE"
+        ].value_counts(dropna=False).to_dict(),
+        "production_authorized": False,
+        "weights_optimized_on_future_return": False,
+        "future_return_used": False,
+        "buy_signal_generated": False,
+        "operational_score_available": False,
     }
 
 
@@ -987,229 +609,32 @@ def save_turnaround(
 # SELF-TEST
 # =============================================================================
 
-def _self_test():
-
-    sample = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-                "4",
-                "5",
-            ],
-
-            "FUNDAMENTAL_ENGINE_OK": [
-                True,
-                True,
-                True,
-                True,
-                True,
-            ],
-
-            "INVESTABLE": [
-                True,
-                True,
-                True,
-                True,
-                True,
-            ],
-
-            "MARGEM_BRUTA": [
-                0.05,
-                0.15,
-                0.30,
-                0.50,
-                0.80,
-            ],
-
-            "MARGEM_LIQUIDA": [
-                -0.10,
-                -0.02,
-                0.05,
-                0.10,
-                0.20,
-            ],
-
-            "ROE": [
-                -0.10,
-                0.01,
-                0.08,
-                0.15,
-                0.25,
-            ],
-
-            "PL_POSITIVO": [
-                True,
-                True,
-                True,
-                True,
-                True,
-            ],
-
-            "FCO_POSITIVO": [
-                False,
-                True,
-                True,
-                True,
-                True,
-            ],
-
-            "EBIT_POSITIVO": [
-                False,
-                True,
-                True,
-                True,
-                True,
-            ],
-        }
-    )
-
+def _self_test() -> bool:
+    from datetime import datetime
     class FakeContext:
-        formation_date = pd.Timestamp(
-            "2025-12-31"
-        )
-
-        accounting_cutoff = pd.Timestamp(
-            "2025-09-30"
-        )
-
-    result = run_turnaround_engine(
-        sample,
-        FakeContext(),
-    )
-
-    indexed = result.set_index(
-        "ISSUER_ID"
-    )
-
-    if not (
-        indexed.loc[
-            "1",
-            "TURNAROUND_RESEARCH_SCORE_COMPLETE",
-        ]
-        >
-        indexed.loc[
-            "5",
-            "TURNAROUND_RESEARCH_SCORE_COMPLETE",
-        ]
-    ):
-        raise TurnaroundError(
-            "SELF-TEST: direção do score MB 100% incorreta."
-        )
-
-    # Verifica matematicamente a ponderação.
-    expected_first = (
-        1.00
-        * indexed.loc[
-            "1",
-            "MARGEM_BRUTA_DEPRESSED_SIGNAL",
-        ]
-    )
-
-    actual_first = indexed.loc[
-        "1",
-        "TURNAROUND_RESEARCH_SCORE_COMPLETE",
-    ]
-
-    if not np.isclose(
-        expected_first,
-        actual_first,
-    ):
-        raise TurnaroundError(
-            "SELF-TEST: peso MB 100% incorreto."
-        )
-
-    production_authorized = bool(
-        TURNAROUND_ENGINE.get(
-            "production_authorized",
-            False,
-        )
-    )
-
-    if production_authorized:
-        valid_mask = (
-            result[
-                "TURNAROUND_RESEARCH_SCORE_VALID"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-        if not (
-            result.loc[
-                valid_mask,
-                "TURNAROUND_OPERATIONAL_SIGNAL",
-            ]
-            == "STUDY_SCORE_AUTHORIZED"
-        ).all():
-            raise TurnaroundError(
-                "SELF-TEST: score MB 100% autorizado não foi "
-                "liberado corretamente."
-            )
-
-        if (
-            result.loc[
-                ~valid_mask,
-                "TURNAROUND_OPERATIONAL_SIGNAL",
-            ]
-            == "STUDY_SCORE_AUTHORIZED"
-        ).any():
-            raise TurnaroundError(
-                "SELF-TEST: score incompleto foi liberado."
-            )
-
-    else:
-        if not (
-            result[
-                "TURNAROUND_OPERATIONAL_SIGNAL"
-            ]
-            == "BLOCKED_RESEARCH_ONLY"
-        ).all():
-            raise TurnaroundError(
-                "SELF-TEST: sinal operacional liberado sem autorização."
-            )
-
-    if (
-        result[
-            "FUTURE_RETURN_USED_TURNAROUND"
-        ]
-        .any()
-    ):
-        raise TurnaroundError(
-            "SELF-TEST: retorno futuro utilizado."
-        )
-
-    contaminated = sample.copy()
-
-    contaminated[
-        "FUTURE_RETURN"
-    ] = [
-        1.0,
-        2.0,
-        3.0,
-        4.0,
-        5.0,
-    ]
-
-    future_blocked = False
-
+        formation_date = pd.Timestamp("2026-01-15")
+        accounting_cutoff = pd.Timestamp("2025-12-31")
+    sample = pd.DataFrame({
+        "ISSUER_ID": ["1", "2"],
+        "MARGEM_BRUTA": [0.1, 0.5],
+        "MARGEM_LIQUIDA": [-0.1, 0.2],
+        "ROE": [-0.2, 0.3],
+        "FUNDAMENTAL_ENGINE_OK": [False, True],
+        "INVESTABLE": [False, False],
+    })
+    result = run_turnaround_engine(sample, FakeContext())
+    if len(result) != 2 or result["TURNAROUND_RESEARCH_SCORE_VALID"].any():
+        raise TurnaroundError("SELF-TEST: score ou filtragem indevida.")
+    if not result["STUDY_34_STATUS"].eq("PENDENTE").all():
+        raise TurnaroundError("SELF-TEST: pendência ausente.")
+    if result["TURNAROUND_RESEARCH_RANK"].notna().any():
+        raise TurnaroundError("SELF-TEST: ranking não validado.")
     try:
-
-        run_turnaround_engine(
-            contaminated,
-            FakeContext(),
-        )
-
+        run_turnaround_engine(sample.assign(FUTURE_RETURN=[1.0, 2.0]), FakeContext())
     except TurnaroundIntegrityError:
-
-        future_blocked = True
-
-    if not future_blocked:
-        raise TurnaroundError(
-            "SELF-TEST: retorno futuro real não foi bloqueado."
-        )
-
+        pass
+    else:
+        raise TurnaroundError("SELF-TEST: retorno futuro não bloqueado.")
     return True
 
 
@@ -1238,10 +663,7 @@ if __name__ == "__main__":
         if production_authorized
         else "RESEARCH ONLY",
     )
-    print("Score do estudo:")
-    print("  MARGEM_BRUTA   = 100%")
-    print("  MARGEM_LIQUIDA = 0% (auditoria)")
-    print("  ROE            = 0% (auditoria)")
+    print("Pontuação antiga: DESATIVADA")
     print("Direção dos três fatores: LOW")
     print("Retorno futuro usado no cálculo: NÃO")
     print("Pesos otimizados por retorno futuro: NÃO")
