@@ -1,0 +1,52 @@
+name: Auditoria CVM PIT
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  auditoria-cvm-pit:
+    name: Auditar ZIPs CVM sem executar o robo
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Obter codigo do repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verificar arquivo do auditor
+        run: |
+          test -f auditoria_cvm_pit.py || {
+            echo 'ERRO: auditoria_cvm_pit.py nao encontrado na raiz do repositorio.'
+            exit 1
+          }
+
+      - name: Executar auditoria independente
+        run: python auditoria_cvm_pit.py
+
+      - name: Mostrar resumo da auditoria
+        if: always()
+        run: |
+          if test -f outputs/cvm_pit_audit/resumo.json; then
+            cat outputs/cvm_pit_audit/resumo.json
+          else
+            echo 'Resumo nao gerado.'
+          fi
+
+      - name: Disponibilizar relatorios para download
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: auditoria-cvm-pit-relatorios
+          path: |
+            outputs/cvm_pit_audit/resumo.json
+            outputs/cvm_pit_audit/inventario.csv
+          if-no-files-found: warn
+          retention-days: 30
