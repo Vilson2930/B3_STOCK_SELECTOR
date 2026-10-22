@@ -18,7 +18,7 @@
 # - Quality;
 # - Valuation;
 # - controles de risco;
-# - modelo fundamental MB 100% e sua proveniência;
+# - histórico do modelo legado desativado;
 # - motivos de exclusão;
 # - alertas metodológicos.
 #
@@ -29,7 +29,7 @@
 # - alterar pesos;
 # - descobrir fatores;
 # - usar retorno futuro;
-# - liberar modelo diferente do MB 100% autorizado.
+# - liberar recomendações sem evidências das 34 etapas.
 #
 # PRINCÍPIO:
 # O relatório descreve exatamente o que os motores decidiram.
@@ -300,230 +300,49 @@ def assert_no_future_information(
 # VALIDAÇÃO DO RESULTADO DE RISCO
 # =============================================================================
 
-def prepare_risk_result(
-    risk_result: pd.DataFrame,
-) -> pd.DataFrame:
-
-    required = {
-        "ISSUER_ID",
-        "FINAL_SCORE",
-        "FINAL_RANK",
-        "RANKING_ELIGIBLE",
-        "RISK_SELECTED",
-        "RISK_STATUS",
-        "RISK_REASON",
-        "PORTFOLIO_WEIGHT",
-    }
-
-    _require_columns(
-        risk_result,
-        required,
-        "risk_result",
-    )
-
-    assert_no_future_information(
-        risk_result
-    )
-
-    result = (
-        risk_result
-        .copy()
-    )
-
-    if (
-        result[
-            "ISSUER_ID"
-        ]
-        .duplicated()
-        .any()
-    ):
-        raise ReportIntegrityError(
-            "FAIL-SAFE: emissor duplicado "
-            "no resultado final."
-        )
-
-    selected = (
-        result[
-            "RISK_SELECTED"
-        ]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    result[
-        "RISK_SELECTED"
-    ] = selected
-
-    result[
-        "PORTFOLIO_WEIGHT"
-    ] = pd.to_numeric(
-        result[
-            "PORTFOLIO_WEIGHT"
-        ],
-        errors="coerce",
-    ).fillna(
-        0.0
-    )
-
-    if selected.any():
-
-        total_weight = float(
-            result.loc[
-                selected,
-                "PORTFOLIO_WEIGHT",
-            ]
-            .sum()
-        )
-
-        if not np.isclose(
-            total_weight,
-            1.0,
-            atol=1e-8,
-        ):
+def prepare_risk_result(risk_result: pd.DataFrame) -> pd.DataFrame:
+    """Aceita resultados pendentes, mas nunca carteira ou ranking não validados."""
+    _require_columns(risk_result, {"ISSUER_ID"}, "risk_result")
+    assert_no_future_information(risk_result)
+    result = risk_result.copy()
+    if result["ISSUER_ID"].isna().any() or result["ISSUER_ID"].duplicated().any():
+        raise ReportIntegrityError("FAIL-SAFE: emissor ausente ou duplicado.")
+    for column in ("FINAL_SCORE", "FINAL_RANK", "RANKING_ELIGIBLE",
+                   "RISK_SELECTED", "RISK_STATUS", "RISK_REASON",
+                   "PORTFOLIO_WEIGHT"):
+        if column not in result:
+            result[column] = pd.NA
+    def explicitly_true(value):
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in ("true", "sim", "1")
+        return False
+    for column in ("RISK_SELECTED", "RANKING_ELIGIBLE",
+                   "TURNAROUND_RESEARCH_USED_IN_RANKING",
+                   "TURNAROUND_RESEARCH_USED_RISK"):
+        if column in result:
+            result[column] = result[column].map(explicitly_true).astype(bool)
+    for column in ("RISK_SELECTED", "RANKING_ELIGIBLE",
+                   "TURNAROUND_RESEARCH_USED_IN_RANKING",
+                   "TURNAROUND_RESEARCH_USED_RISK"):
+        if column in result and result[column].any():
             raise ReportIntegrityError(
-                "FAIL-SAFE: carteira selecionada "
-                "não soma 100%. "
-                f"Soma={total_weight}"
+                f"FAIL-SAFE: {column} indica seleção sem aprovação das 34 etapas."
             )
-
-    if (
-        "TURNAROUND_RESEARCH_USED_IN_RANKING"
-        in result.columns
-    ):
-
-        used = (
-            result[
-                "TURNAROUND_RESEARCH_USED_IN_RANKING"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-        if used.any():
-
-            required_study_columns = {
-                "RANKING_MODEL",
-                "MARGEM_BRUTA_WEIGHT",
-                "MARGEM_LIQUIDA_WEIGHT",
-                "ROE_WEIGHT",
-            }
-
-            missing = (
-                required_study_columns
-                - set(result.columns)
-            )
-
-            if missing:
-                raise ReportIntegrityError(
-                    "FAIL-SAFE: score do estudo entrou no relatório "
-                    "sem metadados obrigatórios: "
-                    f"{sorted(missing)}"
-                )
-
-            models = (
-                result.loc[
-                    used,
-                    "RANKING_MODEL",
-                ]
-                .dropna()
-                .astype(str)
-                .str.strip()
-                .unique()
-                .tolist()
-            )
-
-            if models != [
-                "MB_100_STUDY"
-            ]:
-                raise ReportIntegrityError(
-                    "FAIL-SAFE: modelo fundamental não autorizado "
-                    f"no relatório: {models}"
-                )
-
-            expected_weights = {
-                "MARGEM_BRUTA_WEIGHT": 1.00,
-                "MARGEM_LIQUIDA_WEIGHT": 0.00,
-                "ROE_WEIGHT": 0.00,
-            }
-
-            for column, expected in expected_weights.items():
-
-                values = pd.to_numeric(
-                    result.loc[
-                        used,
-                        column,
-                    ],
-                    errors="coerce",
-                )
-
-                if values.isna().any():
-                    raise ReportIntegrityError(
-                        "FAIL-SAFE: peso ausente/inválido "
-                        f"no relatório: {column}"
-                    )
-
-                if not np.isclose(
-                    values.to_numpy(dtype=float),
-                    expected,
-                    atol=1e-12,
-                    rtol=0.0,
-                ).all():
-                    raise ReportIntegrityError(
-                        "FAIL-SAFE: peso divergente do estudo "
-                        f"no relatório: {column}; "
-                        f"esperado={expected}."
-                    )
-
-            for column in (
-                "QUALITY_WEIGHT",
-                "VALUATION_WEIGHT",
-            ):
-
-                if column in result.columns:
-
-                    values = pd.to_numeric(
-                        result.loc[
-                            used,
-                            column,
-                        ],
-                        errors="coerce",
-                    )
-
-                    if (
-                        values.isna().any()
-                        or not np.isclose(
-                            values.to_numpy(dtype=float),
-                            0.0,
-                            atol=1e-12,
-                            rtol=0.0,
-                        ).all()
-                    ):
-                        raise ReportIntegrityError(
-                            "FAIL-SAFE: peso legado diferente "
-                            f"de zero no relatório: {column}."
-                        )
-
-    if (
-        "TURNAROUND_RESEARCH_USED_RISK"
-        in result.columns
-    ):
-
-        used_risk = (
-            result[
-                "TURNAROUND_RESEARCH_USED_RISK"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-        # O Risk pode transportar o score já produzido pelo Ranking,
-        # mas não pode recalcular/utilizar Turnaround de forma independente.
-        if used_risk.any():
+    weights = pd.to_numeric(result["PORTFOLIO_WEIGHT"], errors="coerce")
+    if weights.fillna(0).ne(0).any():
+        raise ReportIntegrityError("FAIL-SAFE: carteira ponderada sem aprovação.")
+    result["PORTFOLIO_WEIGHT"] = 0.0
+    for column in ("FINAL_SCORE", "FINAL_RANK"):
+        if pd.to_numeric(result[column], errors="coerce").notna().any():
             raise ReportIntegrityError(
-                "FAIL-SAFE: Turnaround foi utilizado "
-                "independentemente pelo Risk Engine."
+                f"FAIL-SAFE: {column} legado não validado."
             )
-
+    result["RISK_SELECTED"] = False
+    result["RANKING_ELIGIBLE"] = False
+    result["STUDY_34_STATUS"] = "PENDENTE"
+    result["STUDY_34_EVIDENCE_VERIFIED"] = False
     return result
 
 
@@ -967,210 +786,42 @@ def build_exclusion_summary(
 # TURNAROUND — SOMENTE PESQUISA
 # =============================================================================
 
-def build_turnaround_research_summary(
-    result: pd.DataFrame,
-) -> dict:
-
-    summary = {
+def build_turnaround_research_summary(result: pd.DataFrame) -> dict:
+    """Informação histórica; não reproduz pesos nem aval do modelo antigo."""
+    status_col = "TURNAROUND_RESEARCH_STATUS"
+    zone_col = "GROSS_MARGIN_ZONE"
+    return {
         "production_authorized": False,
         "used_in_final_ranking": False,
         "used_in_risk": False,
-        "model": None,
-        "weights": {
-            "MARGEM_BRUTA": 1.00,
-            "MARGEM_LIQUIDA": 0.00,
-            "ROE": 0.00,
-        },
-        "status_distribution": {},
-        "gross_margin_zone_distribution": {},
+        "model": "DISABLED_LEGACY_MB100",
+        "weights": {},
+        "status_distribution": (
+            result[status_col].value_counts(dropna=False).to_dict()
+            if status_col in result else {}
+        ),
+        "gross_margin_zone_distribution": (
+            result[zone_col].value_counts(dropna=False).to_dict()
+            if zone_col in result else {}
+        ),
     }
-
-    if (
-        "TURNAROUND_PRODUCTION_AUTHORIZED"
-        in result.columns
-    ):
-
-        authorization = (
-            result[
-                "TURNAROUND_PRODUCTION_AUTHORIZED"
-            ]
-            .fillna(False)
-            .astype(bool)
-        )
-
-        summary[
-            "production_authorized"
-        ] = bool(
-            authorization.any()
-        )
-
-    if (
-        "TURNAROUND_RESEARCH_USED_IN_RANKING"
-        in result.columns
-    ):
-
-        summary[
-            "used_in_final_ranking"
-        ] = bool(
-            result[
-                "TURNAROUND_RESEARCH_USED_IN_RANKING"
-            ]
-            .fillna(False)
-            .astype(bool)
-            .any()
-        )
-
-        if (
-            summary["used_in_final_ranking"]
-            and "RANKING_MODEL" in result.columns
-        ):
-            models = (
-                result.loc[
-                    result[
-                        "TURNAROUND_RESEARCH_USED_IN_RANKING"
-                    ]
-                    .fillna(False)
-                    .astype(bool),
-                    "RANKING_MODEL",
-                ]
-                .dropna()
-                .astype(str)
-                .unique()
-                .tolist()
-            )
-            if len(models) == 1:
-                summary["model"] = models[0]
-
-    if (
-        "TURNAROUND_RESEARCH_USED_RISK"
-        in result.columns
-    ):
-
-        summary[
-            "used_in_risk"
-        ] = bool(
-            result[
-                "TURNAROUND_RESEARCH_USED_RISK"
-            ]
-            .fillna(False)
-            .astype(bool)
-            .any()
-        )
-
-    if (
-        "TURNAROUND_RESEARCH_STATUS"
-        in result.columns
-    ):
-
-        counts = (
-            result[
-                "TURNAROUND_RESEARCH_STATUS"
-            ]
-            .fillna(
-                "UNKNOWN"
-            )
-            .astype(str)
-            .value_counts()
-            .to_dict()
-        )
-
-        summary[
-            "status_distribution"
-        ] = {
-            str(key):
-                int(value)
-
-            for key, value
-            in counts.items()
-        }
-
-    if (
-        "GROSS_MARGIN_ZONE"
-        in result.columns
-    ):
-
-        counts = (
-            result[
-                "GROSS_MARGIN_ZONE"
-            ]
-            .fillna(
-                "UNKNOWN"
-            )
-            .astype(str)
-            .value_counts()
-            .to_dict()
-        )
-
-        summary[
-            "gross_margin_zone_distribution"
-        ] = {
-            str(key):
-                int(value)
-
-            for key, value
-            in counts.items()
-        }
-
-    return summary
 
 
 # =============================================================================
 # ALERTAS METODOLÓGICOS
 # =============================================================================
 
-def build_methodology_notes(
-    result: pd.DataFrame,
-) -> list[str]:
-
-    notes = [
-        (
-            "O ranking operacional utiliza o modelo do estudo: "
-            "100% Margem Bruta, com Margem Líquida e ROE sem peso, "
-            "todos com direção LOW."
-        ),
-        (
-            "Quality e Valuation podem permanecer no relatório como "
-            "informação auxiliar, mas não recebem peso no score principal."
-        ),
-        (
-            "O Report Engine não recalcula nem altera o score MB 100%; "
-            "apenas valida e descreve o resultado recebido."
-        ),
-        (
-            "Margem bruta baixa não constitui isoladamente "
-            "recomendação de compra."
-        ),
-        (
-            "Retorno futuro não é utilizado na execução operacional."
-        ),
-        (
-            "O Risk Engine pode excluir empresas bem posicionadas "
-            "no ranking para controlar concentração."
-        ),
+def build_methodology_notes(result: pd.DataFrame) -> list[str]:
+    return [
+        "Relatório de pesquisa das 34 etapas; nenhuma empresa integralmente aprovada.",
+        "A metodologia antiga DISABLED_LEGACY_MB100 está desativada.",
+        "Pontuações e rankings antigos não são critérios de investimento.",
+        "CAPEX, fluxo de caixa livre, dívida líquida, ROIC/WACC e valor justo "
+        "dependem de evidências documentais independentes.",
+        "Sem comprovação integral, o status é PENDENTE, não APROVADO.",
+        "Retornos futuros são proibidos nas decisões Point-in-Time.",
+        "Nenhuma carteira ou recomendação de compra é emitida.",
     ]
-
-    if (
-        "MIN_POSITIONS_REACHED"
-        in result.columns
-    ):
-
-        reached = bool(
-            result[
-                "MIN_POSITIONS_REACHED"
-            ]
-            .fillna(False)
-            .iloc[0]
-        )
-
-        if not reached:
-
-            notes.append(
-                "A quantidade mínima configurada de posições "
-                "não foi atingida; o sistema não completou a carteira "
-                "com empresas inelegíveis."
-            )
-
-    return notes
 
 
 # =============================================================================
@@ -1260,6 +911,13 @@ def build_report(
             build_methodology_notes(
                 result
             ),
+
+        "study_34": {
+            "status": "PENDENTE",
+            "fully_approved_issuers": 0,
+            "evidence_verified": False,
+            "investment_recommendations_authorized": False,
+        },
 
         "portfolio":
             [
@@ -1605,7 +1263,7 @@ Maior posição
 OPERACIONAL COM FAIL-SAFE<br><br>
 
 <strong>Modelo:</strong>
-{turnaround["model"] or "MB_100_STUDY"}<br>
+{turnaround["model"] or "DISABLED_LEGACY_MB100"}<br>
 
 <strong>Pesos:</strong>
 Margem Bruta 100% / Margem Líquida 0% / ROE 0%<br>
@@ -1761,7 +1419,7 @@ def save_report(
             False,
 
         "study_model":
-            "MB_100_STUDY",
+            "DISABLED_LEGACY_MB100",
 
         "study_weights": {
             "MARGEM_BRUTA": 1.00,
@@ -1839,261 +1497,36 @@ def save_report(
 # SELF-TEST
 # =============================================================================
 
-def _self_test():
-
-    sample = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-            ],
-
-            "TICKERS": [
-                "AAAA3",
-                "BBBB3",
-                "CCCC3",
-            ],
-
-            "FCA_SETOR_ATIVIDADE": [
-                "INDUSTRIA",
-                "ENERGIA",
-                "LOGISTICA",
-            ],
-
-            "FINAL_SCORE": [
-                0.85,
-                0.75,
-                0.60,
-            ],
-
-            "FINAL_RANK": [
-                1,
-                2,
-                3,
-            ],
-
-            "QUALITY_SCORE": [
-                0.90,
-                0.70,
-                0.60,
-            ],
-
-            "VALUATION_SCORE": [
-                0.73,
-                0.87,
-                0.60,
-            ],
-
-            "TURNAROUND_RESEARCH_SCORE": [
-                0.10,
-                0.95,
-                0.20,
-            ],
-
-            "TURNAROUND_RESEARCH_STATUS": [
-                "NO_SIGNAL",
-                "HIGH_RESEARCH_INTEREST",
-                "NO_SIGNAL",
-            ],
-
-            "GROSS_MARGIN_ZONE": [
-                "HIGH",
-                "VERY_LOW",
-                "MID",
-            ],
-
-            "TURNAROUND_PRODUCTION_AUTHORIZED": [
-                True,
-                True,
-                True,
-            ],
-
-            "TURNAROUND_RESEARCH_USED_IN_RANKING": [
-                True,
-                True,
-                True,
-            ],
-
-            "RANKING_MODEL": [
-                "MB_100_STUDY",
-                "MB_100_STUDY",
-                "MB_100_STUDY",
-            ],
-
-            "MARGEM_BRUTA_WEIGHT": [
-                1.00,
-                1.00,
-                1.00,
-            ],
-
-            "MARGEM_LIQUIDA_WEIGHT": [
-                0.00,
-                0.00,
-                0.00,
-            ],
-
-            "ROE_WEIGHT": [
-                0.00,
-                0.00,
-                0.00,
-            ],
-
-            "QUALITY_WEIGHT": [
-                0.0,
-                0.0,
-                0.0,
-            ],
-
-            "VALUATION_WEIGHT": [
-                0.0,
-                0.0,
-                0.0,
-            ],
-
-            "TURNAROUND_RESEARCH_USED_RISK": [
-                False,
-                False,
-                False,
-            ],
-
-            "RANKING_ELIGIBLE": [
-                True,
-                True,
-                True,
-            ],
-
-            "RISK_SELECTED": [
-                True,
-                True,
-                False,
-            ],
-
-            "RISK_STATUS": [
-                "SELECTED",
-                "SELECTED",
-                "REJECTED",
-            ],
-
-            "RISK_REASON": [
-                "SELECTED_BY_RANK",
-                "SELECTED_BY_RANK",
-                "MAX_POSITIONS_REACHED",
-            ],
-
-            "PORTFOLIO_WEIGHT": [
-                0.50,
-                0.50,
-                0.00,
-            ],
-        }
-    )
-
-    class FakeContext:
-
-        formation_date = pd.Timestamp(
-            "2025-12-31"
-        )
-
-        accounting_cutoff = pd.Timestamp(
-            "2025-09-30"
-        )
-
-        market_cutoff = pd.Timestamp(
-            "2025-12-30"
-        )
-
-    report = build_report(
-        sample,
-        FakeContext(),
-    )
-
-    if (
-        report[
-            "universe"
-        ][
-            "portfolio_selected"
-        ]
-        != 2
+def _self_test() -> bool:
+    class Context:
+        formation_date = pd.Timestamp("2026-01-15")
+        accounting_cutoff = pd.Timestamp("2025-12-31")
+        market_cutoff = pd.Timestamp("2026-01-15")
+    sample = pd.DataFrame({
+        "ISSUER_ID": ["1", "2"],
+        "RISK_SELECTED": [False, False],
+        "RANKING_ELIGIBLE": [False, False],
+        "PORTFOLIO_WEIGHT": [0.0, 0.0],
+        "FINAL_SCORE": [np.nan, np.nan],
+        "FINAL_RANK": [np.nan, np.nan],
+        "RISK_STATUS": ["PENDING", "PENDING"],
+        "RISK_REASON": ["STUDY34_PENDING", "STUDY34_PENDING"],
+    })
+    report = build_report(sample, Context())
+    if report["portfolio"] or not report["methodology_notes"]:
+        raise ReportError("SELF-TEST: carteira ou metodologia incorreta.")
+    for changes in (
+        {"RISK_SELECTED": ["True", "False"]},
+        {"PORTFOLIO_WEIGHT": [0.5, 0.0]},
+        {"FINAL_SCORE": [0.9, np.nan]},
+        {"FUTURE_RETURN": [0.5, 0.2]},
     ):
-
-        raise ReportError(
-            "SELF-TEST: quantidade selecionada incorreta."
-        )
-
-    if not (
-        report[
-            "turnaround_research"
-        ][
-            "used_in_final_ranking"
-        ]
-    ):
-
-        raise ReportError(
-            "SELF-TEST: modelo MB 100% autorizado "
-            "não foi preservado no relatório."
-        )
-
-    if (
-        report[
-            "turnaround_research"
-        ][
-            "model"
-        ]
-        != "MB_100_STUDY"
-    ):
-
-        raise ReportError(
-            "SELF-TEST: modelo do estudo incorreto no relatório."
-        )
-
-    contaminated = sample.copy()
-    contaminated["MARGEM_BRUTA_WEIGHT"] = 0.95
-
-    blocked = False
-
-    try:
-        prepare_risk_result(
-            contaminated
-        )
-    except ReportIntegrityError:
-        blocked = True
-
-    if not blocked:
-        raise ReportError(
-            "SELF-TEST: peso divergente do estudo não foi bloqueado."
-        )
-
-    portfolio = build_portfolio_table(
-        sample
-    )
-
-    if not np.isclose(
-        portfolio[
-            "PORTFOLIO_WEIGHT"
-        ]
-        .sum(),
-        1.0,
-    ):
-
-        raise ReportError(
-            "SELF-TEST: pesos incorretos."
-        )
-
-    html = build_html_report(
-        sample,
-        FakeContext(),
-    )
-
-    if (
-        str(PROJECT_NAME)
-        not in html
-    ):
-
-        raise ReportError(
-            "SELF-TEST: HTML inválido."
-        )
-
+        try:
+            prepare_risk_result(sample.assign(**changes))
+        except ReportIntegrityError:
+            pass
+        else:
+            raise ReportError("SELF-TEST: dado proibido não bloqueado.")
     return True
 
 
@@ -2111,7 +1544,7 @@ if __name__ == "__main__":
 
     print("Self-test: OK")
     print("Carteira: REPORTADA")
-    print("Modelo MB 100%: REPORTADO E VALIDADO")
+    print("Modelo legado desativado: REPORTADO E VALIDADO")
     print("Quality: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
     print("Valuation: AUXILIAR / SEM PESO NO SCORE PRINCIPAL")
     print("Risk: REPORTADO")
