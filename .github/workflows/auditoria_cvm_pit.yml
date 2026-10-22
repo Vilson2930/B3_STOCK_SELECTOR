@@ -10,7 +10,7 @@ jobs:
   auditoria-cvm-pit:
     name: Baixar e auditar ZIPs CVM sem executar o robo
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Obter codigo do repositorio
@@ -114,17 +114,17 @@ jobs:
           test -f auditoria_cvm_pit_fase3.py
           python auditoria_cvm_pit_fase3.py
 
-      - name: Inspecionar conteudo dos nove documentos - fase 6 sem homologacao
+      - name: Extrair e comparar valores XML e CVM - fase 7 sem homologacao
         run: |
-          test -f auditoria_cvm_pit_fase6.py
-          python auditoria_cvm_pit_fase6.py
+          test -f auditoria_cvm_pit_fase7.py
+          python auditoria_cvm_pit_fase7.py
 
       - name: Verificar geracao dos relatorios
         if: always()
         shell: bash
         run: |
           set -e
-          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase6_documentos.csv fase6_membros.csv fase6_resumo.json; do
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase7_documentos.csv fase7_valores_xml.csv fase7_comparacoes_candidatas.csv fase7_alertas.csv fase7_resumo.json; do
             caminho="outputs/cvm_pit_audit/$arquivo"
             if test -f "$caminho"; then
               echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
@@ -161,8 +161,10 @@ jobs:
             outputs/cvm_pit_audit/fase3_versoes.csv
             outputs/cvm_pit_audit/fase3_cortes_historicos.csv
             outputs/cvm_pit_audit/fase3_alertas.csv
-            outputs/cvm_pit_audit/fase6_documentos.csv
-            outputs/cvm_pit_audit/fase6_membros.csv
-            outputs/cvm_pit_audit/fase6_resumo.json
+            outputs/cvm_pit_audit/fase7_documentos.csv
+            outputs/cvm_pit_audit/fase7_valores_xml.csv
+            outputs/cvm_pit_audit/fase7_comparacoes_candidatas.csv
+            outputs/cvm_pit_audit/fase7_alertas.csv
+            outputs/cvm_pit_audit/fase7_resumo.json
           if-no-files-found: error
           retention-days: 30
