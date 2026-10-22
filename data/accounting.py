@@ -3087,8 +3087,10 @@ def _prepare_statement(
     if result.empty:
         return result
 
-    # DT_REFER é período econômico, NÃO publicação. Dados sem documento
-    # oficial verificável não podem ser considerados conhecidos no passado.
+    # DT_REFER é período econômico, NÃO publicação.
+    # A vinculação documental é tentada somente quando há registro local.
+    # O registro, por si só, NÃO certifica a autenticidade das publicações.
+    result = _attach_documentary_publication_evidence(result)
     result = _enforce_verified_publication_pit(result, context)
     if result.empty:
         return result
@@ -3121,6 +3123,84 @@ def _prepare_statement(
 # =============================================================================
 # EVIDÊNCIA DE PUBLICAÇÃO — GATE PIT (ESTUDO DAS 34 ETAPAS)
 # =============================================================================
+
+def _attach_documentary_publication_evidence(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    """Relaciona DFP/ITR a um registro documental sem certificar a fonte.
+
+    Chave exata: dataset, CNPJ, data de referência e versão. Uma associação
+    ausente ou ambígua permanece pendente; nunca é preenchida por estimativa.
+    A autenticação independente continua obrigatória no gate PIT.
+    """
+    from data.cvm import PUBLICATION_REGISTRY_DIR, load_publication_registry
+
+    registry_path = PUBLICATION_REGISTRY_DIR / "publication_registry.csv"
+    if not registry_path.is_file():
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: registro documental não encontrado em "
+            f"{registry_path}. É necessário coletar e auditar publicações "
+            "oficiais da CVM, incluindo protocolo e versão."
+        )
+
+    required = ("SOURCE_DATASET", "CNPJ_CIA", "DT_REFER", "VERSAO")
+    missing = [name for name in required if name not in df.columns]
+    if missing:
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: demonstrações sem chave documental "
+            f"completa para vinculação PIT: {missing}."
+        )
+
+    registry = load_publication_registry(registry_path)
+    working = df.copy()
+    working["_PIT_JOIN_DATASET"] = (
+        working["SOURCE_DATASET"].astype("string").str.strip().str.upper()
+    )
+    working["_PIT_JOIN_CNPJ"] = working["CNPJ_CIA"].map(_cnpj)
+    working["_PIT_JOIN_REFERENCE"] = pd.to_datetime(
+        working["DT_REFER"], errors="coerce"
+    ).dt.normalize()
+    working["_PIT_JOIN_VERSION"] = (
+        working["VERSAO"].astype("string").str.strip()
+    )
+
+    evidence = registry.copy()
+    evidence["_PIT_JOIN_DATASET"] = evidence["SOURCE_DATASET"]
+    evidence["_PIT_JOIN_CNPJ"] = evidence["CNPJ_CIA"]
+    evidence["_PIT_JOIN_REFERENCE"] = evidence["DT_REFER"].dt.normalize()
+    evidence["_PIT_JOIN_VERSION"] = evidence["VERSAO"].astype("string").str.strip()
+
+    keys = (
+        "_PIT_JOIN_DATASET", "_PIT_JOIN_CNPJ",
+        "_PIT_JOIN_REFERENCE", "_PIT_JOIN_VERSION",
+    )
+    evidence = evidence.loc[:, [
+        *keys, "DT_PUBLICACAO_CVM_VERIFICADA",
+        "PROTOCOLO_CVM_DOCUMENTO", "URL_DOCUMENTO_CVM",
+        "EVIDENCIA_ORIGEM",
+    ]]
+    linked = working.merge(
+        evidence, on=list(keys), how="left", validate="many_to_one",
+        indicator="_PIT_DOCUMENT_MATCH",
+    )
+    if linked["_PIT_DOCUMENT_MATCH"].ne("both").any():
+        pending = int(linked["_PIT_DOCUMENT_MATCH"].ne("both").sum())
+        raise AccountingPITError(
+            "PENDENTE — FAIL-SAFE: "
+            f"{pending} linhas contábeis sem correspondência documental "
+            "exata no registro CVM. Nenhuma data foi imputada."
+        )
+
+    # A implementação atual de data.cvm valida somente a ESTRUTURA do CSV.
+    # Portanto, mesmo com associação exata, não há prova independente de
+    # que os protocolos e horários vieram da CVM. Não marcar PIT_VALID.
+    raise AccountingPITError(
+        "PENDENTE — FAIL-SAFE: documentos associados ao registro local, "
+        "mas a autenticidade de protocolo, versão e publicação ainda "
+        "não foi comprovada por coletor oficial independente. "
+        "Um CSV validado não constitui evidência PIT certificada."
+    )
+
 
 def _enforce_verified_publication_pit(
     df: pd.DataFrame,
