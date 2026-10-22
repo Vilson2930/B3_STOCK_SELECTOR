@@ -1,10 +1,9 @@
-name: B3 Stock Selector
+name: B3 Stock Selector — Estudo 34 Etapas
 
 on:
   workflow_dispatch:
-
   schedule:
-    # Segunda a sexta, 11:00 UTC
+    # Segunda a sexta, 11:00 UTC (08:00 em Brasília, UTC-3)
     - cron: "0 11 * * 1-5"
 
 permissions:
@@ -16,339 +15,175 @@ concurrency:
 
 jobs:
   run-b3-selector:
-    name: Run B3 Stock Selector
+    name: Pesquisa B3 — auditoria das 34 etapas
     runs-on: ubuntu-latest
     timeout-minutes: 60
-
     env:
       PYTHONPATH: ${{ github.workspace }}
+      PYTHONDONTWRITEBYTECODE: "1"
 
     steps:
-
-      # =======================================================================
-      # REPOSITÓRIO
-      # =======================================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      # =======================================================================
-      # PYTHON
-      # =======================================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: "pip"
-
-      # =======================================================================
-      # DEPENDÊNCIAS
-      # =======================================================================
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      # =======================================================================
-      # VALIDAÇÃO DE SINTAXE
-      # =======================================================================
-
       - name: Validate Python syntax
         run: |
-          python -m compileall \
-            main.py \
-            config.py \
-            data \
-            engines \
-            reports
-
-      # =======================================================================
-      # SELF-TEST — PIT
-      # =======================================================================
+          python -m compileall -q main.py config.py data engines reports
 
       - name: Test PIT Engine
-        run: |
-          python -m data.pit
-
-      # =======================================================================
-      # SELF-TEST — MARKET
-      # =======================================================================
+        run: python -m data.pit
 
       - name: Test Market Engine
-        run: |
-          python -m data.market
-
-      # =======================================================================
-      # SELF-TEST — ACCOUNTING
-      # =======================================================================
+        run: python -m data.market
 
       - name: Test Accounting Engine
-        run: |
-          python -m data.accounting
-
-      # =======================================================================
-      # SELF-TEST — UNIVERSE
-      # =======================================================================
+        run: python -m data.accounting
 
       - name: Test Universe Engine
-        run: |
-          python -m engines.universe
-
-      # =======================================================================
-      # SELF-TEST — INVESTABILITY
-      # =======================================================================
+        run: python -m engines.universe
 
       - name: Test Investability Engine
-        run: |
-          python -m engines.investability
-
-      # =======================================================================
-      # SELF-TEST — FUNDAMENTALS
-      # =======================================================================
+        run: python -m engines.investability
 
       - name: Test Fundamentals Engine
-        run: |
-          python -m engines.fundamentals
-
-      # =======================================================================
-      # SELF-TEST — QUALITY
-      # =======================================================================
+        run: python -m engines.fundamentals
 
       - name: Test Quality Engine
-        run: |
-          python -m engines.quality
-
-      # =======================================================================
-      # SELF-TEST — TURNAROUND
-      # =======================================================================
+        run: python -m engines.quality
 
       - name: Test Turnaround Engine
-        run: |
-          python -m engines.turnaround
-
-      # =======================================================================
-      # SELF-TEST — VALUATION
-      # =======================================================================
+        run: python -m engines.turnaround
 
       - name: Test Valuation Engine
-        run: |
-          python -m engines.valuation
-
-      # =======================================================================
-      # SELF-TEST — RANKING
-      # =======================================================================
+        run: python -m engines.valuation
 
       - name: Test Ranking Engine
-        run: |
-          python -m engines.ranking
-
-      # =======================================================================
-      # SELF-TEST — RISK
-      # =======================================================================
+        run: python -m engines.ranking
 
       - name: Test Risk Engine
-        run: |
-          python -m engines.risk
-
-      # =======================================================================
-      # SELF-TEST — REPORT
-      # =======================================================================
+        run: python -m engines.risk
 
       - name: Test Report Engine
-        run: |
-          python -m reports.report
+        run: python -m reports.report
 
-      # =======================================================================
-      # CONFIG
-      # =======================================================================
+      - name: Test Email Report Safety Offline
+        run: |
+          python - <<'PY'
+          from reports.email_report import _self_test
+          if _self_test() is not True:
+              raise RuntimeError('FAIL-SAFE: autoteste do relatório por e-mail falhou.')
+          print('Email safety: OK (sem envio real)')
+          PY
 
       - name: Validate configuration
         run: |
           python - <<'PY'
           from config import validate_config
-
           validate_config()
-
-          print("=" * 72)
-          print("CONFIG VALIDATION")
-          print("=" * 72)
-          print("Status: OK")
-          print("Look-ahead: BLOQUEADO")
-          print("Future return: BLOQUEADO")
-          print("=" * 72)
+          print('Configuração: verificação executada; não equivale a auditoria PIT integral.')
           PY
-
-      # =======================================================================
-      # MAIN — EXECUÇÃO REAL DE PRODUÇÃO
-      # =======================================================================
-
-      - name: Run Main Pipeline
-        run: |
-          python main.py --run
-
-      # =======================================================================
-      # TURNAROUND SAFETY LOCK
-      # =======================================================================
 
       - name: Validate Turnaround production lock
         run: |
           python - <<'PY'
           from config import TURNAROUND_ENGINE
-
-          production_authorized = bool(
-              TURNAROUND_ENGINE.get(
-                  "production_authorized",
-                  False,
-              )
-          )
-
-          validated_rule = TURNAROUND_ENGINE.get(
-              "validated_rule"
-          )
-
-          if production_authorized and validated_rule is None:
-              raise RuntimeError(
-                  "FAIL-SAFE: Turnaround autorizado para produção "
-                  "sem regra validada."
-              )
-
-          print("=" * 72)
-          print("TURNAROUND SAFETY CHECK")
-          print("=" * 72)
-          print(
-              "Production authorized:",
-              production_authorized,
-          )
-          print(
-              "Validated rule:",
-              validated_rule,
-          )
-          print("=" * 72)
+          if not isinstance(TURNAROUND_ENGINE, dict):
+              raise RuntimeError('FAIL-SAFE: TURNAROUND_ENGINE inválido.')
+          if TURNAROUND_ENGINE.get('production_authorized') is not False:
+              raise RuntimeError('FAIL-SAFE: turnaround não pode operar em produção.')
+          print('Turnaround: pesquisa apenas; seleção proibida.')
           PY
 
-      # =======================================================================
-      # AUDITORIA FUTURE RETURN
-      # =======================================================================
-
-      - name: Audit future-return references
-        shell: bash
+      - name: Prepare isolated outputs
         run: |
-          echo "============================================================"
-          echo "FUTURE RETURN REFERENCE AUDIT"
-          echo "============================================================"
+          # Evita reaproveitar resultados de uma execução anterior.
+          rm -rf outputs
+          mkdir -p outputs
 
-          grep -RniE \
-            "FUTURE_RETURN|RETORNO_FUTURO|FUTURE_WINNER|WINNER_LABEL" \
-            main.py config.py data engines reports \
-            || true
+      - name: Run Main Pipeline
+        run: python main.py --run
 
-          echo "============================================================"
-          echo "Audit completed."
-          echo "References above must correspond only to fail-safe/audit logic."
-          echo "============================================================"
+      - name: Validate scientific audit manifest
+        run: |
+          python - <<'PY'
+          import json
+          import math
+          from pathlib import Path
+          from reports.email_report import _validate_manifest
 
-      # =======================================================================
-      # VALIDAÇÃO DOS OUTPUTS
-      # =======================================================================
+          paths = sorted(Path('outputs/runs').glob('run_manifest_*.json'))
+          if len(paths) != 1:
+              raise RuntimeError(
+                  f'FAIL-SAFE: esperado 1 manifesto desta execução; encontrados {len(paths)}.'
+              )
+          path = paths[0]
+          manifest = json.loads(path.read_text(encoding='utf-8'))
+          _validate_manifest(manifest)
+          audit = manifest['audit']
+          if audit.get('study_34_status') != 'PENDENTE':
+              raise RuntimeError('FAIL-SAFE: estado científico não é PENDENTE.')
+          count = audit.get('study_34_approval_count')
+          if isinstance(count, bool) or count != 0:
+              raise RuntimeError('FAIL-SAFE: aprovações não comprovadas.')
+          if audit.get('recommendations_authorized') is not False:
+              raise RuntimeError('FAIL-SAFE: recomendações indevidamente autorizadas.')
+          if not manifest.get('stage_files'):
+              raise RuntimeError('FAIL-SAFE: manifesto sem arquivos de etapas.')
+          print('Manifesto validado:', path)
+          print('Status: PENDENTE; zero seleções e zero recomendações.')
+          print('Este controle não certifica a validade econômica das 34 etapas.')
+          PY
 
       - name: Validate generated outputs
         shell: bash
         run: |
-          echo "============================================================"
-          echo "GENERATED OUTPUTS"
-          echo "============================================================"
-
-          if [ ! -d "outputs" ]; then
-            echo "FAIL-SAFE: diretório outputs/ não foi criado."
-            exit 1
-          fi
-
-          FILE_COUNT=$(find outputs -type f | wc -l)
-
-          echo "Arquivos encontrados: $FILE_COUNT"
-
-          if [ "$FILE_COUNT" -eq 0 ]; then
-            echo "FAIL-SAFE: pipeline terminou sem gerar arquivos."
-            exit 1
-          fi
-
-          echo ""
-          echo "Arquivos gerados:"
+          test -d outputs
+          test "$(find outputs -type f | wc -l)" -gt 0
           find outputs -type f -print
 
-          echo "============================================================"
-
-      # =======================================================================
-      # ENVIO DO RELATÓRIO POR E-MAIL
-      # Executa somente após pipeline e validação dos outputs concluírem com sucesso.
-      # As credenciais permanecem exclusivamente nos GitHub Secrets.
-      # =======================================================================
-
-      - name: Send report by Gmail
+      - name: Send pending research report by Gmail
         if: success()
         env:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
-        run: |
-          python -m reports.email_report
-
-      # =======================================================================
-      # UPLOAD DOS RESULTADOS
-      # =======================================================================
+        run: python -m reports.email_report
 
       - name: Upload outputs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: b3-stock-selector-${{ github.run_number }}
+          name: b3-study34-${{ github.run_number }}
           path: outputs/
           if-no-files-found: warn
           retention-days: 30
 
-      # =======================================================================
-      # RESUMO
-      # =======================================================================
-
       - name: Execution summary
         if: success()
+        shell: bash
         run: |
-          echo "## B3 STOCK SELECTOR" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "### Pipeline" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "✅ Sintaxe validada" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ PIT validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Market validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Accounting validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Universe validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Investability validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Fundamentals validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Quality validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Turnaround Research validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Valuation validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Ranking validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Risk validado" >> "$GITHUB_STEP_SUMMARY"
-          echo "✅ Report validado" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Segurança metodológica" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "**Turnaround:** Research Only" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Future return na execução:** NÃO" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "**Look-ahead:** BLOQUEADO" >> "$GITHUB_STEP_SUMMARY"
-
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Resultados" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-
-          echo '```text' >> "$GITHUB_STEP_SUMMARY"
-          find outputs -type f -print >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '## B3 Stock Selector — Estudo das 34 etapas'
+            echo ''
+            echo '- Execução técnica: concluída'
+            echo '- Manifesto: validado como PENDENTE'
+            echo '- Empresas integralmente aprovadas: 0 (conforme manifesto)'
+            echo '- Carteiras e recomendações: bloqueadas'
+            echo '- Auditoria econômica integral: ainda não certificada'
+            echo ''
+            echo '### Arquivos produzidos'
+            echo '```text'
+            find outputs -type f -print
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
