@@ -31,12 +31,11 @@ jobs:
       - name: Baixar ZIPs oficiais CVM e verificar integridade
         shell: bash
         run: |
-          python - <<'PY'
+          python - <<'PYCODE'
           import hashlib
           import json
           import os
           import time
-          import urllib.error
           import urllib.request
           import zipfile
           from pathlib import Path
@@ -105,10 +104,25 @@ jobs:
           print(f'Downloads validos: {len(records) - len(failures)}/10', flush=True)
           if failures:
               print('AVISO: ha downloads ausentes; auditoria sera parcial.', flush=True)
-          PY
+          PYCODE
 
       - name: Executar auditoria independente
         run: python auditoria_cvm_pit.py
+
+      - name: Verificar geracao dos relatorios
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv; do
+            caminho="outputs/cvm_pit_audit/$arquivo"
+            if test -f "$caminho"; then
+              echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
+            else
+              echo "AUSENTE: $caminho"
+              exit 1
+            fi
+          done
 
       - name: Mostrar resumo da auditoria
         if: always()
@@ -128,5 +142,8 @@ jobs:
             outputs/cvm_pit_audit/resumo.json
             outputs/cvm_pit_audit/inventario.csv
             outputs/cvm_pit_audit/downloads.json
-          if-no-files-found: warn
+            outputs/cvm_pit_audit/documentos.csv
+            outputs/cvm_pit_audit/correspondencias.csv
+            outputs/cvm_pit_audit/anomalias.csv
+          if-no-files-found: error
           retention-days: 30
