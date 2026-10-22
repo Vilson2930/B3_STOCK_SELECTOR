@@ -4358,10 +4358,15 @@ def _self_test() -> None:
         sample
     )
 
-    prepared = _prepare_statement(
-        sample,
-        context,
-    )
+    # Teste isolado: os metadados sintéticos acima são fornecidos
+    # somente ao teste. O coletor real permanece obrigatório em produção.
+    from unittest.mock import patch
+
+    with patch(
+        f"{__name__}._attach_documentary_publication_evidence",
+        side_effect=lambda frame: frame,
+    ):
+        prepared = _prepare_statement(sample, context)
 
     if len(prepared) != 1:
         raise AccountingPITError(
@@ -4389,15 +4394,32 @@ def _self_test() -> None:
             "SELF-TEST: valor incorreto."
         )
 
+    # O gate PIT precisa rejeitar evidência ausente mesmo no teste isolado.
+    with patch(
+        f"{__name__}._attach_documentary_publication_evidence",
+        side_effect=lambda frame: frame,
+    ):
+        try:
+            _prepare_statement(
+                sample.drop(columns=["DT_PUBLICACAO_CVM_VERIFICADA"]),
+                context,
+            )
+        except AccountingPITError:
+            pass
+        else:
+            raise AssertionError(
+                "SELF-TEST: dado sem publicação foi aceito."
+            )
+
+    # Sem o coletor oficial, o fluxo de produção deve continuar bloqueado.
     try:
-        _prepare_statement(
-            sample.drop(columns=["DT_PUBLICACAO_CVM_VERIFICADA"]),
-            context,
-        )
+        _prepare_statement(sample, context)
     except AccountingPITError:
         pass
     else:
-        raise AssertionError("SELF-TEST: dado sem publicação foi aceito.")
+        raise AssertionError(
+            "SELF-TEST: fluxo real sem coletor oficial foi liberado."
+        )
 
     print("PIT: OK")
     print("Normalização: OK")
