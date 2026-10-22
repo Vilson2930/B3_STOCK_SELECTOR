@@ -2211,9 +2211,14 @@ def build_share_class_data(
         "ACCOUNTING_CUTOFF"
     ] = context.accounting_cutoff
 
-    classes[
-        "PIT_VALID"
-    ] = True
+    # A composição do capital e o FRE foram filtrados somente por DT_REFER.
+    # Não é possível afirmar PIT_VALID sem prova de publicação para CADA
+    # versão usada. O gate não deve aprovar classes por essa aproximação.
+    raise AccountingPITError(
+        "PENDENTE — FAIL-SAFE: composição do capital DFP/ITR e FRE "
+        "sem publicação documental autenticada por versão. "
+        "Não é permitido marcar PIT_VALID apenas com DT_REFER."
+    )
 
     classes[
         "FUTURE_RETURN_USED"
@@ -3138,9 +3143,10 @@ def _attach_documentary_publication_evidence(
     registry_path = PUBLICATION_REGISTRY_DIR / "publication_registry.csv"
     if not registry_path.is_file():
         raise AccountingPITError(
-            "PENDENTE — FAIL-SAFE: registro documental não encontrado em "
-            f"{registry_path}. É necessário coletar e auditar publicações "
-            "oficiais da CVM, incluindo protocolo e versão."
+            "PENDENTE — FAIL-SAFE: coletor oficial de publicações CVM "
+            "ainda não homologado. Registro local ausente em "
+            f"{registry_path}. Não criar CSV artificial: é necessária "
+            "evidência oficial autenticada por protocolo, versão e data."
         )
 
     required = ("SOURCE_DATASET", "CNPJ_CIA", "DT_REFER", "VERSAO")
