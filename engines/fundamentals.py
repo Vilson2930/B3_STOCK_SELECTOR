@@ -544,8 +544,10 @@ def prepare_fundamental_base(
         )
     publication = pd.to_datetime(result[publication_col], errors="coerce", utc=True)
     versions = result[version_col].astype("string")
-    cutoff = pd.Timestamp(context.accounting_cutoff).tz_localize("UTC")
-    formation = pd.Timestamp(context.formation_date).tz_localize("UTC")
+    cutoff = pd.Timestamp(context.accounting_cutoff)
+    formation = pd.Timestamp(context.formation_date)
+    cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+    formation = formation.tz_localize("UTC") if formation.tzinfo is None else formation.tz_convert("UTC")
     if (
         publication.isna().any()
         or publication.gt(cutoff).any()
@@ -1596,6 +1598,17 @@ def _self_test():
                 "2025-09-30",
                 "2025-09-30",
             ],
+
+            # Datas e versões fictícias APENAS para o autoteste.
+            # Não representam documentos reais nem certificam dados CVM.
+            "DT_PUBLICACAO_CVM_CANONICAL": [
+                "2025-08-15",
+                "2025-08-15",
+            ],
+            "CVM_DOCUMENT_VERSION_CANONICAL": [
+                "SELFTEST_FIXTURE_V1",
+                "SELFTEST_FIXTURE_V1",
+            ],
         }
     )
 
@@ -1611,6 +1624,35 @@ def _self_test():
 
         market_cutoff = pd.Timestamp(
             "2025-12-30"
+        )
+
+    # O autoteste DEVE rejeitar ausência de prova de publicação/versão.
+    for missing_column in (
+        "DT_PUBLICACAO_CVM_CANONICAL",
+        "CVM_DOCUMENT_VERSION_CANONICAL",
+    ):
+        try:
+            build_fundamentals(
+                sample.drop(columns=[missing_column]),
+                FakeContext(),
+            )
+        except FundamentalPITError:
+            pass
+        else:
+            raise FundamentalError(
+                f"SELF-TEST: documento sem {missing_column} foi aceito."
+            )
+
+    # Publicação após o cutoff também deve ser rejeitada.
+    late_sample = sample.copy()
+    late_sample.loc[0, "DT_PUBLICACAO_CVM_CANONICAL"] = "2025-10-01"
+    try:
+        build_fundamentals(late_sample, FakeContext())
+    except FundamentalPITError:
+        pass
+    else:
+        raise FundamentalError(
+            "SELF-TEST: publicação posterior ao cutoff foi aceita."
         )
 
     fundamentals, coverage = (
