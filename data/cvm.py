@@ -875,6 +875,58 @@ def publication_registry_status(path: str | Path) -> dict:
 
 
 # =============================================================================
+# DIAGNÓSTICO PIT — SEM PROMOÇÃO AUTOMÁTICA DE EVIDÊNCIAS
+# =============================================================================
+
+def inspect_publication_evidence(dataset: str, year: int) -> dict:
+    """Inventaria colunas de proveniência nos CSVs oficiais já armazenados.
+
+    Não efetua downloads. Não confunde DT_REFER, VERSAO, DT_RECEB,
+    carimbo do ZIP ou data de download com publicação autenticada.
+    Não produz nem autentica publication_registry.csv.
+    """
+    dataset = _normalize_dataset(dataset)
+    year = _validate_year(year)
+    path = local_zip_path(dataset, year)
+    if not path.is_file():
+        return {
+            "dataset": dataset, "year": year,
+            "status": "PENDENTE_ZIP_AUSENTE", "files": [],
+            "source_authenticated": False, "pit_approved": False,
+        }
+    validate_zip(path)
+    inventory = []
+    with zipfile.ZipFile(path) as archive:
+        for name in sorted(archive.namelist()):
+            if not name.lower().endswith('.csv'):
+                continue
+            with archive.open(name) as stream:
+                try:
+                    columns = list(pd.read_csv(
+                        stream, sep=';', encoding='latin1', nrows=0
+                    ).columns)
+                except Exception as exc:
+                    raise CVMDataError(
+                        f"FAIL-SAFE: cabeçalho CSV ilegível em {name}"
+                    ) from exc
+            names = [str(x).strip().upper() for x in columns]
+            candidates = [x for x in names if any(
+                term in x for term in (
+                    'RECEB', 'ENTREG', 'PUBLIC', 'PROTOC', 'DOCUMENT',
+                    'VERSAO', 'DT_REFER'
+                )
+            )]
+            inventory.append({"file": name, "candidate_columns": candidates})
+    return {
+        "dataset": dataset, "year": year,
+        "status": "PENDENTE_AUTENTICACAO_DOCUMENTAL",
+        "zip_sha256": _sha256(path), "files": inventory,
+        "source_authenticated": False, "pit_approved": False,
+        "note": "Colunas candidatas não comprovam data de divulgação nem versão PIT.",
+    }
+
+
+# =============================================================================
 # TESTE DO MÓDULO
 # =============================================================================
 
