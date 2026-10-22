@@ -301,112 +301,29 @@ def assert_no_future_information(
 # PROTEÇÃO TURNAROUND RESEARCH
 # =============================================================================
 
-def assert_ranking_study_model_integrity(
-    df: pd.DataFrame,
-) -> None:
-    """
-    O Risk Engine não descobre nem recalcula fatores.
+def _strict_bool(value) -> bool:
+    """Fail-safe: texto 'False' e valores desconhecidos não são True."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "sim", "1"}
+    return False
 
-    Ele pode receber o score MB 100% já produzido e autorizado pelo
-    Ranking Engine, desde que os metadados confirmem exatamente o modelo
-    do estudo. Qualquer uso ambíguo/legado de Turnaround continua bloqueado.
-    """
 
-    used_column = "TURNAROUND_RESEARCH_USED_IN_RANKING"
-
-    if used_column not in df.columns:
-        return
-
-    used = (
-        df[used_column]
-        .fillna(False)
-        .astype(bool)
-    )
-
-    if not used.any():
-        return
-
-    required_metadata = {
-        "RANKING_MODEL",
-        "MARGEM_BRUTA_WEIGHT",
-        "MARGEM_LIQUIDA_WEIGHT",
-        "ROE_WEIGHT",
-    }
-
-    missing = required_metadata - set(df.columns)
-
-    if missing:
-        raise RiskIntegrityError(
-            "FAIL-SAFE: ranking usa o score do estudo, mas faltam "
-            f"metadados obrigatórios: {sorted(missing)}"
-        )
-
-    models = (
-        df.loc[used, "RANKING_MODEL"]
-        .dropna()
-        .astype(str)
-        .str.strip()
-        .unique()
-        .tolist()
-    )
-
-    if models != ["MB_100_STUDY"]:
-        raise RiskIntegrityError(
-            "FAIL-SAFE: modelo de ranking não autorizado no Risk Engine. "
-            f"Modelos detectados={models}"
-        )
-
-    expected_weights = {
-        "MARGEM_BRUTA_WEIGHT": 1.00,
-        "MARGEM_LIQUIDA_WEIGHT": 0.00,
-        "ROE_WEIGHT": 0.00,
-    }
-
-    for column, expected in expected_weights.items():
-
-        values = pd.to_numeric(
-            df.loc[used, column],
-            errors="coerce",
-        )
-
-        if values.isna().any():
+def assert_ranking_study_model_integrity(df: pd.DataFrame) -> None:
+    """Rejeita expressamente o modelo legado; não autoriza modelos novos."""
+    for column in ("RANKING_MODEL", "MODEL_NAME"):
+        if column in df.columns and df[column].astype("string").str.contains(
+            r"MB_100_STUDY|TURNAROUND", case=False, na=False, regex=True
+        ).any():
             raise RiskIntegrityError(
-                "FAIL-SAFE: peso do estudo ausente/inválido "
-                f"em {column}."
+                "FAIL-SAFE: modelo antigo de ranking não pertence ao estudo das 34 etapas."
             )
-
-        if not np.isclose(
-            values.to_numpy(dtype=float),
-            expected,
-            atol=1e-12,
-            rtol=0.0,
-        ).all():
+    for column in ("TURNAROUND_RESEARCH_USED_IN_RANKING", "STUDY_SCORE_FROM_RANKING_ACCEPTED_RISK"):
+        if column in df.columns and df[column].map(_strict_bool).any():
             raise RiskIntegrityError(
-                "FAIL-SAFE: peso divergente do estudo em "
-                f"{column}. Esperado={expected}."
+                f"FAIL-SAFE: dependência de ranking antigo: {column}."
             )
-
-    # Se os metadados legados existirem, eles não podem reintroduzir
-    # Quality ou Valuation no score principal.
-    for column in (
-        "QUALITY_WEIGHT",
-        "VALUATION_WEIGHT",
-    ):
-        if column in df.columns:
-            values = pd.to_numeric(
-                df.loc[used, column],
-                errors="coerce",
-            )
-            if values.isna().any() or not np.isclose(
-                values.to_numpy(dtype=float),
-                0.0,
-                atol=1e-12,
-                rtol=0.0,
-            ).all():
-                raise RiskIntegrityError(
-                    "FAIL-SAFE: peso legado diferente de zero "
-                    f"detectado em {column}."
-                )
 
 
 # =============================================================================
@@ -590,7 +507,7 @@ def prepare_ranking(
         result[
             "RANKING_ELIGIBLE"
         ]
-        .fillna(False)
+        .map(_strict_bool)
         .astype(bool)
     )
 
@@ -1086,15 +1003,16 @@ def run_risk_engine(
         ranking
     )
 
-    result = apply_risk_selection(
-        base,
-        risk_config,
-    )
-
-    result = assign_portfolio_weights(
-        result,
-        risk_config,
-    )
+    # A infraestrutura de limites e concentração é preservada para quando
+    # existir uma carteira cientificamente aprovada. Nenhuma empresa passa
+    # apenas por score/rank legado ou elegibilidade técnica.
+    result = base.copy()
+    result["RISK_STATUS"] = "PENDING"
+    result["RISK_REASON"] = "STUDY_34_DOCUMENTARY_AND_VALUATION_EVIDENCE_PENDING"
+    result["RISK_SELECTED"] = False
+    result["PORTFOLIO_WEIGHT"] = 0.0
+    result["STUDY_34_STATUS"] = "PENDENTE"
+    result["RISK_SELECTION_AUTHORIZED"] = False
 
     selected_count = int(
         result[
@@ -1128,7 +1046,7 @@ def run_risk_engine(
 
     result[
         "RISK_ENGINE_VERSION"
-    ] = "0.2.0"
+    ] = "0.3.0-study34-pending"
 
     result[
         "FORMATION_DATE_RISK"
@@ -1153,13 +1071,7 @@ def run_risk_engine(
     result[
         "STUDY_SCORE_FROM_RANKING_ACCEPTED_RISK"
     ] = (
-        result[
-            "TURNAROUND_RESEARCH_USED_IN_RANKING"
-        ]
-        .fillna(False)
-        .astype(bool)
-        if "TURNAROUND_RESEARCH_USED_IN_RANKING" in result.columns
-        else False
+        False
     )
 
     result = (
@@ -1458,213 +1370,35 @@ def save_risk(
 # =============================================================================
 
 def _self_test():
-
-    sample = pd.DataFrame(
-        {
-            "ISSUER_ID": [
-                "1",
-                "2",
-                "3",
-                "4",
-            ],
-            "FINAL_SCORE": [
-                0.90,
-                0.80,
-                0.70,
-                0.60,
-            ],
-            "FINAL_RANK": [
-                1,
-                2,
-                3,
-                4,
-            ],
-            "RANKING_ELIGIBLE": [
-                True,
-                True,
-                True,
-                True,
-            ],
-            "FCA_SETOR_ATIVIDADE": [
-                "INDUSTRIA",
-                "INDUSTRIA",
-                "ENERGIA",
-                "LOGISTICA",
-            ],
-            "TURNAROUND_RESEARCH_USED_IN_RANKING": [
-                True,
-                True,
-                True,
-                True,
-            ],
-            "RANKING_MODEL": [
-                "MB_100_STUDY",
-                "MB_100_STUDY",
-                "MB_100_STUDY",
-                "MB_100_STUDY",
-            ],
-            "MARGEM_BRUTA_WEIGHT": [1.00, 1.00, 1.00, 1.00],
-            "MARGEM_LIQUIDA_WEIGHT": [0.00, 0.00, 0.00, 0.00],
-            "ROE_WEIGHT": [0.00, 0.00, 0.00, 0.00],
-            "QUALITY_WEIGHT": [0.0, 0.0, 0.0, 0.0],
-            "VALUATION_WEIGHT": [0.0, 0.0, 0.0, 0.0],
-            "FUTURE_RETURN_USED_RANKING": [
-                False,
-                False,
-                False,
-                False,
-            ],
-        }
-    )
-
     class FakeContext:
+        formation_date = pd.Timestamp("2025-12-31")
+        accounting_cutoff = pd.Timestamp("2025-09-30")
+        market_cutoff = pd.Timestamp("2025-12-30")
 
-        formation_date = pd.Timestamp(
-            "2025-12-31"
-        )
-
-        accounting_cutoff = pd.Timestamp(
-            "2025-09-30"
-        )
-
-        market_cutoff = pd.Timestamp(
-            "2025-12-30"
-        )
-
-    result = run_risk_engine(
-        sample,
-        FakeContext(),
-    )
-
-    selected = (
-        result.loc[
-            result[
-                "RISK_SELECTED"
-            ]
-        ]
-    )
-
-    if selected.empty:
-        raise RiskError(
-            "SELF-TEST: nenhuma empresa selecionada."
-        )
-
-    if (
-        selected[
-            "FINAL_RANK"
-        ].min()
-        != 1
-    ):
-        raise RiskError(
-            "SELF-TEST: primeira empresa do ranking "
-            "não foi preservada."
-        )
-
-    if not np.isclose(
-        selected[
-            "PORTFOLIO_WEIGHT"
-        ].sum(),
-        1.0,
-    ):
-        raise RiskError(
-            "SELF-TEST: pesos não somam 100%."
-        )
-
-    if (
-        result[
-            "FUTURE_RETURN_USED_RISK"
-        ]
-        .fillna(False)
-        .astype(bool)
-        .any()
-    ):
-        raise RiskError(
-            "SELF-TEST: retorno futuro utilizado."
-        )
-
-    if (
-        result[
-            "TURNAROUND_RESEARCH_USED_RISK"
-        ]
-        .fillna(False)
-        .astype(bool)
-        .any()
-    ):
-        raise RiskError(
-            "SELF-TEST: Turnaround Research utilizado."
-        )
-
-    # Teste obrigatório:
-    # metadado de auditoria True deve ser bloqueado.
-
-    contaminated = sample.copy()
-
-    contaminated[
-        "FUTURE_RETURN_USED_RANKING"
-    ] = True
-
-    blocked = False
-
-    try:
-        run_risk_engine(
-            contaminated,
-            FakeContext(),
-        )
-
-    except RiskIntegrityError:
-        blocked = True
-
-    if not blocked:
-        raise RiskError(
-            "SELF-TEST: metadado de retorno futuro "
-            "True não foi bloqueado."
-        )
-
-    # Modelo/pesos do estudo divergentes também devem ser bloqueados.
-
-    contaminated = sample.copy()
-    contaminated["MARGEM_BRUTA_WEIGHT"] = 0.40
-
-    blocked = False
-
-    try:
-        run_risk_engine(
-            contaminated,
-            FakeContext(),
-        )
-    except RiskIntegrityError:
-        blocked = True
-
-    if not blocked:
-        raise RiskError(
-            "SELF-TEST: peso divergente do estudo não foi bloqueado."
-        )
-
-    # Variável real de retorno futuro também deve ser bloqueada.
-
-    contaminated = sample.copy()
-
-    contaminated[
-        "FUTURE_RETURN"
-    ] = 1.0
-
-    blocked = False
-
-    try:
-        run_risk_engine(
-            contaminated,
-            FakeContext(),
-        )
-
-    except RiskIntegrityError:
-        blocked = True
-
-    if not blocked:
-        raise RiskError(
-            "SELF-TEST: variável FUTURE_RETURN "
-            "não foi bloqueada."
-        )
-
+    sample = pd.DataFrame({
+        "ISSUER_ID": ["1", "2"],
+        "FINAL_SCORE": [0.9, 0.8],
+        "FINAL_RANK": [1, 2],
+        "RANKING_ELIGIBLE": ["False", True],
+        "FCA_SETOR_ATIVIDADE": ["INDUSTRIA", "ENERGIA"],
+        "FUTURE_RETURN_USED_RANKING": [False, False],
+    })
+    result = run_risk_engine(sample, FakeContext())
+    if result["RISK_SELECTED"].any() or result["PORTFOLIO_WEIGHT"].ne(0).any():
+        raise RiskError("SELF-TEST: seleção/peso habilitado sem evidências.")
+    if not result["STUDY_34_STATUS"].eq("PENDENTE").all():
+        raise RiskError("SELF-TEST: pendência ausente.")
+    if prepare_ranking(sample)["RANKING_ELIGIBLE"].iloc[0]:
+        raise RiskError("SELF-TEST: texto False interpretado como True.")
+    for field, value in (("FUTURE_RETURN", 1), ("RANKING_MODEL", "MB_100_STUDY")):
+        contaminated = sample.copy()
+        contaminated[field] = value
+        try:
+            run_risk_engine(contaminated, FakeContext())
+        except RiskIntegrityError:
+            pass
+        else:
+            raise RiskError(f"SELF-TEST: {field} não bloqueado.")
     return True
 
 
@@ -1681,14 +1415,14 @@ if __name__ == "__main__":
     _self_test()
 
     print("Self-test: OK")
-    print("Ranking econômico: PRESERVADO")
+    print("Ranking antigo: NÃO AUTORIZADO")
     print("Número de posições: CONTROLADO")
     print("Concentração setorial: CONTROLÁVEL")
-    print("Pesos: EQUAL WEIGHT")
+    print("Pesos: ZERO até aprovação documentada")
     print("Retorno futuro: NÃO UTILIZADO")
-    print("Score MB 100% do Ranking: ACEITO E PRESERVADO")
+    print("Score MB 100%: BLOQUEADO")
     print("Turnaround recalculado pelo Risk: NÃO")
     print("Otimização por retorno: NÃO")
-    print("Seleção final: AUDITÁVEL")
+    print("Seleção final: PENDENTE")
 
     print("=" * 72)
