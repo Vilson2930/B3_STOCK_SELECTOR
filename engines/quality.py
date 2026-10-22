@@ -1006,7 +1006,14 @@ def save_quality(
 # =============================================================================
 
 def _self_test() -> bool:
+    """Testa o motor em modo isolado sem habilitar Quality em produção.
+
+    A configuração original é restaurada mesmo em caso de exceção.
+    O teste não valida empiricamente os fatores ou aprova empresas.
+    """
     from types import SimpleNamespace
+    from unittest.mock import patch
+
     context = SimpleNamespace(
         formation_date=pd.Timestamp("2026-10-05"),
         accounting_cutoff=pd.Timestamp("2026-09-30"),
@@ -1020,23 +1027,40 @@ def _self_test() -> bool:
         "DT_PUBLICACAO_CVM_VERIFICADA": ["2026-08-01", "2026-08-01"],
         "PROTOCOLO_CVM_DOCUMENTO": ["TEST-1", "TEST-2"],
     })
-    result = run_quality_engine(sample, context)
-    assert len(result) == 1
-    assert result["ISSUER_ID"].iloc[0] == "1"
-    assert result["QUALITY_SCORE"].isna().all()
-    assert (~result["QUALITY_SCORE_VALID"]).all()
-    assert result["QUALITY_STUDY_STATUS"].eq("PENDENTE").all()
-    for bad in (
-        sample.drop(columns=["PROTOCOLO_CVM_DOCUMENTO"]),
-        sample.assign(DT_PUBLICACAO_CVM_VERIFICADA="2026-10-06"),
-        sample.assign(FUTURE_RETURN=1.0),
-    ):
+
+    # Primeiro verifica que a desativação operacional continua protegida.
+    with patch.dict(QUALITY_ENGINE, {"enabled": False}):
         try:
-            run_quality_engine(bad, context)
-        except QualityIntegrityError:
-            pass
+            run_quality_engine(sample, context)
+        except QualityError as exc:
+            if "desativado" not in str(exc):
+                raise
         else:
-            raise QualityError("SELF-TEST: dado não elegível foi aceito.")
+            raise QualityError("SELF-TEST: bloqueio operacional falhou.")
+
+    # Habilitação exclusivamente temporária durante o teste sintético.
+    # patch.dict restaura QUALITY_ENGINE ao final do bloco.
+    with patch.dict(QUALITY_ENGINE, {"enabled": True}):
+        result = run_quality_engine(sample, context)
+        if len(result) != 1 or result["ISSUER_ID"].iloc[0] != "1":
+            raise QualityError("SELF-TEST: filtro de elegibilidade falhou.")
+        if not result["QUALITY_SCORE"].isna().all():
+            raise QualityError("SELF-TEST: score não validado foi liberado.")
+        if result["QUALITY_SCORE_VALID"].fillna(False).any():
+            raise QualityError("SELF-TEST: score marcado como validado.")
+        if not result["QUALITY_STUDY_STATUS"].eq("PENDENTE").all():
+            raise QualityError("SELF-TEST: status científico incorreto.")
+        for bad in (
+            sample.drop(columns=["PROTOCOLO_CVM_DOCUMENTO"]),
+            sample.assign(DT_PUBLICACAO_CVM_VERIFICADA="2026-10-06"),
+            sample.assign(FUTURE_RETURN=1.0),
+        ):
+            try:
+                run_quality_engine(bad, context)
+            except QualityIntegrityError:
+                pass
+            else:
+                raise QualityError("SELF-TEST: dado não elegível aceito.")
     return True
 
 
