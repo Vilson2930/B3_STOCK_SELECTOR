@@ -337,6 +337,37 @@ def safe_positive_multiple(
 # PREPARAÇÃO
 # =============================================================================
 
+def _strict_boolean(values: pd.Series) -> pd.Series:
+    """Somente indicadores explicitamente verdadeiros são verdadeiros."""
+    def parse(value):
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "sim", "1"}:
+                return True
+            if normalized in {"false", "não", "nao", "0"}:
+                return False
+        return pd.NA
+    return values.map(parse).astype("boolean")
+
+
+def _valuation_evidence(df: pd.DataFrame, context: PITContext) -> pd.Series:
+    """Sem data de publicação e documento, a avaliação é pendente."""
+    date_col = next((c for c in ("DT_PUBLICACAO_CVM_VERIFICADA", "PUBLICATION_DATE_VERIFIED") if c in df), None)
+    doc_col = next((c for c in ("PROTOCOLO_CVM_DOCUMENTO", "CVM_DOCUMENT_ID") if c in df), None)
+    if date_col is None or doc_col is None:
+        return pd.Series(False, index=df.index, dtype=bool)
+    published = pd.to_datetime(df[date_col], utc=True, errors="coerce")
+    cutoff = pd.Timestamp(context.accounting_cutoff)
+    formed = pd.Timestamp(context.formation_date)
+    cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
+    formed = formed.tz_localize("UTC") if formed.tzinfo is None else formed.tz_convert("UTC")
+    documents = df[doc_col].astype("string")
+    return (published.notna() & published.le(cutoff) & published.le(formed)
+            & documents.notna() & documents.str.strip().ne("").fillna(False)).fillna(False).astype(bool)
+
+
 def prepare_valuation_base(
     df: pd.DataFrame,
 ) -> pd.DataFrame:
@@ -359,23 +390,16 @@ def prepare_valuation_base(
         .copy()
     )
 
-    if "INVESTABLE" in result.columns:
-
-        result = result.loc[
-            result[
-                "INVESTABLE"
-            ]
-            .fillna(False)
-            .astype(bool)
-        ].copy()
-
-    result = result.loc[
-        result[
-            "FUNDAMENTAL_ENGINE_OK"
-        ]
-        .fillna(False)
-        .astype(bool)
-    ].copy()
+    # O estudo de 34 etapas ainda não aprovou empresas. Preservamos
+    # os candidatos para auditoria, sem transformar triagem em aprovação.
+    result["VALUATION_INPUT_FUNDAMENTAL_OK"] = (
+        _strict_boolean(result["FUNDAMENTAL_ENGINE_OK"])
+    )
+    result["VALUATION_INPUT_INVESTABLE"] = (
+        _strict_boolean(result["INVESTABLE"])
+        if "INVESTABLE" in result.columns
+        else pd.Series(pd.NA, index=result.index, dtype="boolean")
+    )
 
     if result.empty:
 
@@ -719,127 +743,24 @@ def low_is_better_percentile(
 # SCORES INDIVIDUAIS
 # =============================================================================
 
-def calculate_valuation_factor_scores(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-
-    result = (
-        df
-        .copy()
-    )
-
-    score_columns = []
-
+def calculate_valuation_factor_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Preserva cobertura, mas não transforma múltiplos em pontuação arbitrária."""
+    result = df.copy()
     for factor in VALUATION_FACTORS:
-
-        score_column = (
-            f"VALUATION_FACTOR_{factor}"
-        )
-
-        result[
-            score_column
-        ] = low_is_better_percentile(
-            result[
-                factor
-            ]
-        )
-
-        score_columns.append(
-            score_column
-        )
-
-    result[
-        "VALUATION_FACTORS_AVAILABLE"
-    ] = (
-        result[
-            score_columns
-        ]
-        .notna()
-        .sum(
-            axis=1
-        )
-        .astype(int)
-    )
-
-    result[
-        "VALUATION_FACTORS_TOTAL"
-    ] = len(
-        score_columns
-    )
-
-    result[
-        "VALUATION_DATA_COVERAGE"
-    ] = (
-        result[
-            "VALUATION_FACTORS_AVAILABLE"
-        ]
-        /
-        result[
-            "VALUATION_FACTORS_TOTAL"
-        ]
-    )
-
+        if factor not in result.columns:
+            result[factor] = np.nan
+        result[f"VALUATION_FACTOR_{factor}"] = np.nan
+    result["VALUATION_FACTORS_AVAILABLE"] = result[list(VALUATION_FACTORS)].notna().sum(axis=1).astype(int)
+    result["VALUATION_FACTORS_TOTAL"] = len(VALUATION_FACTORS)
+    result["VALUATION_DATA_COVERAGE"] = result["VALUATION_FACTORS_AVAILABLE"] / len(VALUATION_FACTORS)
     return result
 
 
-# =============================================================================
-# SCORE DE VALUATION
-# =============================================================================
-
-def calculate_valuation_score(
-    df: pd.DataFrame,
-) -> pd.DataFrame:
-    """
-    Pesos iguais.
-
-    Não há otimização baseada em retorno futuro.
-
-    Exigimos ao menos dois múltiplos válidos para gerar um score utilizável.
-    """
-
-    result = (
-        df
-        .copy()
-    )
-
-    score_columns = [
-        f"VALUATION_FACTOR_{factor}"
-        for factor in VALUATION_FACTORS
-    ]
-
-    result[
-        "VALUATION_SCORE"
-    ] = (
-        result[
-            score_columns
-        ]
-        .mean(
-            axis=1,
-            skipna=True,
-        )
-    )
-
-    insufficient = (
-        result[
-            "VALUATION_FACTORS_AVAILABLE"
-        ]
-        < 2
-    )
-
-    result.loc[
-        insufficient,
-        "VALUATION_SCORE",
-    ] = np.nan
-
-    result[
-        "VALUATION_SCORE_VALID"
-    ] = (
-        result[
-            "VALUATION_SCORE"
-        ]
-        .notna()
-    )
-
+def calculate_valuation_score(df: pd.DataFrame) -> pd.DataFrame:
+    """API legada: sem score até validação formal das 34 etapas."""
+    result = df.copy()
+    result["VALUATION_SCORE"] = np.nan
+    result["VALUATION_SCORE_VALID"] = False
     return result
 
 
@@ -899,42 +820,17 @@ def run_valuation_engine(
         "FUTURE_RETURN_USED_VALUATION"
     ] = False
 
-    # -------------------------------------------------------------------------
-    # RANK INTERNO
-    #
-    # Não é ranking final de compra.
-    # -------------------------------------------------------------------------
-
-    result[
-        "VALUATION_RANK"
-    ] = (
-        result[
-            "VALUATION_SCORE"
-        ]
-        .rank(
-            ascending=False,
-            method="min",
-            na_option="bottom",
-        )
+    # Múltiplos são descritivos, não demonstram valor justo.
+    result["VALUATION_RANK"] = np.nan
+    result["VALUATION_DOCUMENT_PIT_VERIFIED"] = _valuation_evidence(result, context)
+    result["FAIR_VALUE_VERIFIED"] = False
+    result["MARGIN_OF_SAFETY_VERIFIED"] = False
+    result["VALUATION_STUDY_34_STATUS"] = "PENDENTE"
+    result["VALUATION_STUDY_34_REASON"] = (
+        "Valor justo, premissas de avaliação, CAPEX, FCL, dívida líquida "
+        "e evidência documental ainda não validados integralmente."
     )
-
-    result = (
-        result
-        .sort_values(
-            [
-                "VALUATION_SCORE",
-                "ISSUER_ID",
-            ],
-            ascending=[
-                False,
-                True,
-            ],
-            kind="mergesort",
-        )
-        .reset_index(
-            drop=True
-        )
-    )
+    result["VALUATION_ENGINE_VERSION"] = "0.2.0-study34-pending"
 
     assert_no_future_return(
         result
@@ -983,7 +879,7 @@ def audit_valuation(
 
     return {
         "status":
-            "OK",
+            "PENDENTE",
 
         "issuers":
             int(
@@ -1214,24 +1110,12 @@ def _self_test():
         )
     )
 
-    # Empresa 1 possui mesmos fundamentos da 2,
-    # porém menor preço/market cap.
-    if not (
-        indexed.loc[
-            "1",
-            "VALUATION_SCORE",
-        ]
-        >
-        indexed.loc[
-            "2",
-            "VALUATION_SCORE",
-        ]
-    ):
-
-        raise ValuationError(
-            "SELF-TEST: empresa mais barata "
-            "não recebeu melhor valuation."
-        )
+    if indexed["VALUATION_SCORE_VALID"].any():
+        raise ValuationError("SELF-TEST: score não validado foi habilitado.")
+    if not indexed["VALUATION_STUDY_34_STATUS"].eq("PENDENTE").all():
+        raise ValuationError("SELF-TEST: pendência ausente.")
+    if indexed["VALUATION_RANK"].notna().any():
+        raise ValuationError("SELF-TEST: ranking não validado.")
 
     # Prejuízo não pode gerar P/L artificialmente barato.
     if not pd.isna(
