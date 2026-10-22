@@ -1098,84 +1098,107 @@ def _self_test():
             "2025-09-30"
         )
 
-    result = run_valuation_engine(
-        sample,
-        FakeContext(),
-    )
+    # Autoteste isolado: nunca modifica permanentemente config.py.
+    # Verifica primeiro o bloqueio de produção quando desativado.
+    from unittest.mock import patch
 
-    indexed = (
-        result
-        .set_index(
-            "ISSUER_ID"
-        )
-    )
+    original_enabled = bool(VALUATION_ENGINE.get("enabled", True))
+    if not original_enabled:
+        try:
+            run_valuation_engine(sample, FakeContext())
+        except ValuationError as exc:
+            if "desativado" not in str(exc).lower():
+                raise
+        else:
+            raise ValuationError(
+                "SELF-TEST: motor desativado foi executado indevidamente."
+            )
 
-    if indexed["VALUATION_SCORE_VALID"].any():
-        raise ValuationError("SELF-TEST: score não validado foi habilitado.")
-    if not indexed["VALUATION_STUDY_34_STATUS"].eq("PENDENTE").all():
-        raise ValuationError("SELF-TEST: pendência ausente.")
-    if indexed["VALUATION_RANK"].notna().any():
-        raise ValuationError("SELF-TEST: ranking não validado.")
+    # Dados sintéticos, nunca comprovação de um documento real da CVM.
+    sample["DT_PUBLICACAO_CVM_VERIFICADA"] = "2025-08-01"
+    sample["PROTOCOLO_CVM_DOCUMENTO"] = ["TEST-1", "TEST-2", "TEST-3"]
 
-    # Prejuízo não pode gerar P/L artificialmente barato.
-    if not pd.isna(
-        indexed.loc[
-            "3",
-            "PL_MULTIPLE",
-        ]
-    ):
-
-        raise ValuationError(
-            "SELF-TEST: P/L negativo foi "
-            "interpretado como múltiplo válido."
-        )
-
-    if (
-        result[
-            "FUTURE_RETURN_USED_VALUATION"
-        ]
-        .any()
-    ):
-
-        raise ValuationError(
-            "SELF-TEST: retorno futuro utilizado."
-        )
-
-    # -------------------------------------------------------------------------
-    # TESTE FAIL-SAFE:
-    # retorno futuro REAL deve continuar bloqueado.
-    # -------------------------------------------------------------------------
-
-    contaminated = sample.copy()
-
-    contaminated[
-        "FUTURE_RETURN"
-    ] = [
-        1.0,
-        2.0,
-        3.0,
-    ]
-
-    future_blocked = False
-
-    try:
-
-        run_valuation_engine(
-            contaminated,
+    # Habilitação transitória exclusivamente para testar cálculos e fail-safes.
+    # patch.dict restaura o dicionário mesmo diante de exceções.
+    with patch.dict(VALUATION_ENGINE, {"enabled": True}):
+        result = run_valuation_engine(
+            sample,
             FakeContext(),
         )
 
-    except ValuationIntegrityError:
-
-        future_blocked = True
-
-    if not future_blocked:
-
-        raise ValuationError(
-            "SELF-TEST: retorno futuro real não foi bloqueado."
+        indexed = (
+            result
+            .set_index(
+                "ISSUER_ID"
+            )
         )
 
-    return True
+        if indexed["VALUATION_SCORE_VALID"].any():
+            raise ValuationError("SELF-TEST: score não validado foi habilitado.")
+        if not indexed["VALUATION_STUDY_34_STATUS"].eq("PENDENTE").all():
+            raise ValuationError("SELF-TEST: pendência ausente.")
+        if indexed["VALUATION_RANK"].notna().any():
+            raise ValuationError("SELF-TEST: ranking não validado.")
+
+        # Prejuízo não pode gerar P/L artificialmente barato.
+        if not pd.isna(
+            indexed.loc[
+                "3",
+                "PL_MULTIPLE",
+            ]
+        ):
+
+            raise ValuationError(
+                "SELF-TEST: P/L negativo foi "
+                "interpretado como múltiplo válido."
+            )
+
+        if (
+            result[
+                "FUTURE_RETURN_USED_VALUATION"
+            ]
+            .any()
+        ):
+
+            raise ValuationError(
+                "SELF-TEST: retorno futuro utilizado."
+            )
+
+        # -------------------------------------------------------------------------
+        # TESTE FAIL-SAFE:
+        # retorno futuro REAL deve continuar bloqueado.
+        # -------------------------------------------------------------------------
+
+        contaminated = sample.copy()
+
+        contaminated[
+            "FUTURE_RETURN"
+        ] = [
+            1.0,
+            2.0,
+            3.0,
+        ]
+
+        future_blocked = False
+
+        try:
+
+            run_valuation_engine(
+                contaminated,
+                FakeContext(),
+            )
+
+        except ValuationIntegrityError:
+
+            future_blocked = True
+
+        if not future_blocked:
+
+            raise ValuationError(
+                "SELF-TEST: retorno futuro real não foi bloqueado."
+            )
+
+        return True
 
 
 # =============================================================================
