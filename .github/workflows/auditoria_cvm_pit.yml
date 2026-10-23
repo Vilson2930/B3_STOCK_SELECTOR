@@ -129,12 +129,17 @@ jobs:
           test -f auditoria_cvm_pit_fase9.py
           python auditoria_cvm_pit_fase9.py
 
+      - name: Preservar ZIPs e diagnosticar hashes e XML - fase 10
+        run: |
+          test -f auditoria_cvm_pit_fase10.py
+          python auditoria_cvm_pit_fase10.py
+
       - name: Verificar geracao dos relatorios
         if: always()
         shell: bash
         run: |
           set -e
-          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase7_documentos.csv fase7_valores_xml.csv fase7_comparacoes_candidatas.csv fase7_alertas.csv fase7_resumo.json fase8_documentos.csv fase8_tags_xml.csv fase8_comparacoes_entre_versoes.csv fase8_alertas.csv fase8_resumo.json fase9_documentos_itr.csv fase9_valores_itr.csv fase9_filtro_semantico.csv fase9_alertas.csv fase9_resumo.json; do
+          for arquivo in resumo.json inventario.csv downloads.json documentos.csv correspondencias.csv anomalias.csv fase3_resumo.json fase3_links_identificadores.csv fase3_divergencias.csv fase3_versoes.csv fase3_cortes_historicos.csv fase3_alertas.csv fase7_documentos.csv fase7_valores_xml.csv fase7_comparacoes_candidatas.csv fase7_alertas.csv fase7_resumo.json fase8_documentos.csv fase8_tags_xml.csv fase8_comparacoes_entre_versoes.csv fase8_alertas.csv fase8_resumo.json fase9_documentos_itr.csv fase9_valores_itr.csv fase9_filtro_semantico.csv fase9_alertas.csv fase9_resumo.json fase10_documentos.csv fase10_membros.csv fase10_tags_xml.csv fase10_alertas.csv fase10_resumo.json; do
             caminho="outputs/cvm_pit_audit/$arquivo"
             if test -f "$caminho"; then
               echo "OK: $caminho ($(wc -c < "$caminho") bytes)"
@@ -186,5 +191,8 @@ jobs:
             outputs/cvm_pit_audit/fase9_filtro_semantico.csv
             outputs/cvm_pit_audit/fase9_alertas.csv
             outputs/cvm_pit_audit/fase9_resumo.json
+            outputs/cvm_pit_audit/fase10_*.csv
+            outputs/cvm_pit_audit/fase10_resumo.json
+            outputs/cvm_pit_audit/fase10_evidencias_zip/*.zip
           if-no-files-found: error
           retention-days: 30
