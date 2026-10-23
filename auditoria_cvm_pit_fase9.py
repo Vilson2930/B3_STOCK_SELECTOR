@@ -75,9 +75,19 @@ def main():
     matches=read_csv('fase8_comparacoes_entre_versoes.csv')
     links={key(r):r for r in read_csv('fase3_links_identificadores.csv')}
     target=[r for r in phase8 if int(r['xml_values'])==0]
-    if len(phase8)!=9 or len(target)!=5:
-        raise RuntimeError(f'Esperados 9 documentos e 5 com zero XML; obtidos {len(phase8)} e {len(target)}. Revisar antes de prosseguir.')
+    if not phase8:
+        raise RuntimeError('Relatorio fase8_documentos.csv vazio: nao e possivel auditar.')
+    # A quantidade de zeros e uma observacao, nunca uma constante de aprovacao.
+    # Uma variacao gera alerta rastreavel, mas nao impede o diagnostico.
     docs=[]; values=[]; issues=[]
+    if len(phase8) != 9:
+        issues.append({'issue':'QUANTIDADE_DOCUMENTOS_DIFERENTE_REFERENCIA',
+                       'detail':f'Referencia historica=9; observado={len(phase8)}'})
+    if len(target) != 5:
+        issues.append({'issue':'QUANTIDADE_XML_ZERO_DIFERENTE_REFERENCIA',
+                       'detail':f'Referencia historica=5; observado={len(target)}; documentos='+
+                       '; '.join(f"{r.get('ticker','?')}:{r.get('dt_refer','?')}:v{r.get('versao','?')}" for r in target)})
+    print(f'Fase 8: {len(phase8)} documentos; {len(target)} sem valores XML. Diagnostico sem homologacao.', flush=True)
     for r in target:
         base={k:r.get(k,'') for k in ('dataset','ticker','cnpj_cia','dt_refer','versao','dt_receb','numero_sequencial')}
         result={**base,'status':'PENDENTE','xml_members':0,'new_tag_values':0,'zip_sha256':'','xml_statuses':'','error':'',
@@ -130,13 +140,21 @@ def main():
         counts.update(reasons)
         sem.append({**r,'semantic_gate':'NAO_HOMOLOGADO','blocking_reasons':'|'.join(reasons),
                     'semantics_verified':False,'reconciled':False,'pit_approved':False})
-    write_csv('fase9_documentos_itr.csv',list(docs[0]),docs)
+    document_fields=['dataset','ticker','cnpj_cia','dt_refer','versao','dt_receb','numero_sequencial',
+                     'status','xml_members','new_tag_values','zip_sha256','xml_statuses','error',
+                     'semantics_verified','publication_authenticated','pit_approved']
+    write_csv('fase9_documentos_itr.csv',document_fields,docs)
     write_csv('fase9_valores_itr.csv',['dataset','ticker','cnpj_cia','dt_refer','versao','dt_receb','numero_sequencial',
               'zip_sha256','member','xml_tag','xml_account_code','xml_account_description','xml_value','xml_value_sha256'],values)
     fields=list(matches[0]) if matches else []
-    write_csv('fase9_filtro_semantico.csv',fields+['semantic_gate','blocking_reasons','pit_approved'],sem)
+    semantic_fields=list(dict.fromkeys(fields+['semantic_gate','blocking_reasons','semantics_verified','reconciled','pit_approved']))
+    write_csv('fase9_filtro_semantico.csv',semantic_fields,sem)
     write_csv('fase9_alertas.csv',['dataset','ticker','cnpj_cia','dt_refer','versao','dt_receb','numero_sequencial','issue','detail'],issues)
     summary={'phase':9,'generated_at_utc':datetime.now(timezone.utc).isoformat(),
+             'phase8_document_count':len(phase8),'phase8_zero_xml_count':len(target),
+             'historical_reference_zero_xml_count':5,
+             'phase8_zero_xml_documents':[{'ticker':r.get('ticker',''),'dt_refer':r.get('dt_refer',''),
+                                          'versao':r.get('versao',''),'dataset':r.get('dataset','')} for r in target],
              'documents_reexamined':len(docs),'documents_with_values':sum(d['new_tag_values']>0 for d in docs),
              'new_tag_values':len(values),'cross_version_candidates_screened':len(sem),
              'semantic_reconciliations_approved':0,'publication_authenticated':False,'pit_approved':False,
